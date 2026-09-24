@@ -6,7 +6,7 @@ from collections.abc import MutableSequence as AbcMutableSequence
 from collections.abc import MutableSet as AbcMutableSet
 from collections.abc import Sequence as AbcSequence
 from collections.abc import Set as AbcSet
-from dataclasses import MISSING, Field, is_dataclass
+from dataclasses import MISSING, Field, InitVar, is_dataclass
 from dataclasses import fields as dataclass_fields
 from functools import partial
 from inspect import signature as _signature
@@ -49,10 +49,12 @@ __all__ = [
     "ANIES",
     "ExceptionGroup",
     "ExtensionsTypedDict",
+    "INITVAR_METADATA_KEY",
     "TypeAlias",
     "adapted_fields",
     "fields_dict",
     "has",
+    "is_initvar_attribute",
     "is_typeddict",
 ]
 
@@ -97,6 +99,14 @@ except ImportError:  # pragma: no cover
 
 NoneType = type(None)
 
+#: Metadata key marking `Attribute`s synthesized from `dataclasses.InitVar` fields.
+INITVAR_METADATA_KEY = "__cattrs_initvar"
+
+
+def is_initvar_attribute(a: Attribute) -> bool:
+    """Whether an attribute was synthesized from a `dataclasses.InitVar` field."""
+    return bool(a.metadata) and bool(a.metadata.get(INITVAR_METADATA_KEY, False))
+
 
 def is_optional(typ: Any) -> bool:
     return is_union_type(typ) and NoneType in typ.__args__ and len(typ.__args__) == 2
@@ -130,21 +140,40 @@ def fields_dict(type) -> dict[str, Union[Attribute, Field]]:
     return attrs_fields_dict(type)
 
 
-def adapted_fields(cl: type) -> list[Attribute]:
+def adapted_fields(cl: type, include_initvars: bool = False) -> list[Attribute]:
     """Return the attrs format of `fields()` for attrs and dataclasses.
 
     Resolves `attrs` stringified annotations, if present.
+
+    :param include_initvars: If true, `dataclasses.InitVar` fields of dataclasses
+        are included as well, in their declaration order relative to the other
+        fields, and marked with `INITVAR_METADATA_KEY` in their metadata. They
+        are not instance attributes, so they must not be unstructured.
+
+    .. versionchanged:: NEXT
+        *include_initvars*
     """
     if is_dataclass(cl):
         attrs = dataclass_fields(cl)
-        if any(isinstance(a.type, str) for a in attrs):
+        normal = {a.name: a for a in attrs}
+        # Fields present in `__dataclass_fields__` but not in `fields()` are
+        # `InitVar`s and `ClassVar`s.
+        pseudo_fields = (
+            [f for f in cl.__dataclass_fields__.values() if f.name not in normal]
+            if include_initvars
+            else []
+        )
+        if any(isinstance(a.type, str) for a in attrs) or any(
+            isinstance(f.type, str) for f in pseudo_fields
+        ):
             # Do this conditionally in case `get_type_hints` fails, so
             # users can resolve on their own first.
             type_hints = get_type_hints(cl)
         else:
             type_hints = {}
-        return [
-            Attribute(
+
+        def to_attribute(attr: Field, type: Any, metadata=None) -> Attribute:
+            return Attribute(
                 attr.name,
                 (
                     attr.default
@@ -161,12 +190,38 @@ def adapted_fields(cl: type) -> list[Attribute]:
                 True,
                 attr.init,
                 True,
-                type=type_hints.get(attr.name, attr.type),
+                metadata=metadata,
+                type=type,
                 alias=attr.name,
                 kw_only=getattr(attr, "kw_only", False),
             )
-            for attr in attrs
-        ]
+
+        if not pseudo_fields:
+            return [to_attribute(a, type_hints.get(a.name, a.type)) for a in attrs]
+
+        initvars = {}
+        for f in pseudo_fields:
+            t = type_hints.get(f.name, f.type)
+            if t is InitVar or isinstance(t, InitVar):
+                initvars[f.name] = f
+
+        if not initvars:
+            return [to_attribute(a, type_hints.get(a.name, a.type)) for a in attrs]
+
+        # Merge the normal fields and `InitVar`s back together in declaration
+        # order, so positional constructor arguments line up with `__init__`.
+        res = []
+        for f in cl.__dataclass_fields__.values():
+            if f.name in normal:
+                res.append(to_attribute(f, type_hints.get(f.name, f.type)))
+            elif f.name in initvars:
+                t = type_hints.get(f.name, f.type)
+                res.append(
+                    to_attribute(
+                        f, Any if t is InitVar else t.type, {INITVAR_METADATA_KEY: True}
+                    )
+                )
+        return res
     attribs = attrs_fields(cl)
     if any(isinstance(a.type, str) for a in attribs):
         # PEP 563 annotations - need to be resolved.

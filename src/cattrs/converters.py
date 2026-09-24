@@ -4,7 +4,7 @@ from collections import Counter, deque
 from collections.abc import Callable, Iterable
 from collections.abc import Mapping as AbcMapping
 from collections.abc import MutableMapping as AbcMutableMapping
-from dataclasses import Field
+from dataclasses import Field, is_dataclass
 from enum import Enum
 from inspect import Signature
 from inspect import signature as inspect_signature
@@ -32,6 +32,7 @@ from ._compat import (
     Sequence,
     Set,
     TypeAlias,
+    adapted_fields,
     fields,
     get_final_base,
     get_newtype_base,
@@ -46,6 +47,7 @@ from ._compat import (
     is_generic,
     is_generic_attrs,
     is_hetero_tuple,
+    is_initvar_attribute,
     is_literal,
     is_mapping,
     is_mutable_sequence,
@@ -785,6 +787,18 @@ class BaseConverter:
 
             # try .alias and .name because this code also supports dataclasses!
             conv_obj[getattr(a, "alias", a.name)] = self._structure_attribute(a, val)
+
+        if is_dataclass(cl):
+            # InitVars are not in `fields()`, but are constructor arguments.
+            for a in adapted_fields(cl, include_initvars=True):
+                if not is_initvar_attribute(a):
+                    continue
+                try:
+                    val = obj[a.name]
+                except KeyError:
+                    continue
+
+                conv_obj[a.alias] = self._structure_attribute(a, val)
 
         return cl(**conv_obj)
 

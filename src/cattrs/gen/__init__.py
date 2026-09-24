@@ -17,6 +17,7 @@ from .._compat import (
     is_bare,
     is_bare_final,
     is_generic,
+    is_initvar_attribute,
 )
 from .._generics import deep_copy_with
 from ..dispatch import UnstructureHook
@@ -121,6 +122,9 @@ def make_dict_unstructure_fn_from_attrs(
 
     for a in attrs:
         attr_name = a.name
+        if is_initvar_attribute(a):
+            # InitVars are not instance attributes, so they are never unstructured.
+            continue
         if attr_name in kwargs:
             override = kwargs[attr_name]
         else:
@@ -282,6 +286,9 @@ def make_dict_unstructure_fn(
     .. versionchanged:: 26.1.0
         `typing.Annotated[T, override()]` is now recognized and can be used to customize
         unstructuring.
+    .. versionchanged:: NEXT
+        `dataclasses.InitVar` fields are never unstructured, since they are not
+        instance attributes.
     """
     origin = get_origin(cl)
     attrs = adapted_fields(origin or cl)  # type: ignore
@@ -799,6 +806,9 @@ def make_dict_structure_fn(
     .. versionchanged:: 26.1.0
         `typing.Annotated[T, override()]` is now recognized and can be used to customize
         unstructuring.
+    .. versionchanged:: NEXT
+        `dataclasses.InitVar` fields are structured according to their declared
+        types and passed to the constructor.
     """
 
     mapping = {}
@@ -813,7 +823,7 @@ def make_dict_structure_fn(
             mapping = generate_mapping(base, mapping)
             break
 
-    attrs = adapted_fields(cl)
+    attrs = adapted_fields(cl, include_initvars=True)
 
     # We keep track of what we're generating to help with recursive
     # class graphs.
