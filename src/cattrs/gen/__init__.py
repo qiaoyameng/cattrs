@@ -799,6 +799,9 @@ def make_dict_structure_fn(
     .. versionchanged:: 26.1.0
         `typing.Annotated[T, override()]` is now recognized and can be used to customize
         unstructuring.
+    .. versionchanged:: 26.3.0
+        Dataclass `InitVar` fields are now structured from the mapping and passed
+        into `__init__`; they are never read back when unstructuring.
     """
 
     mapping = {}
@@ -813,7 +816,9 @@ def make_dict_structure_fn(
             mapping = generate_mapping(base, mapping)
             break
 
-    attrs = adapted_fields(cl)
+    # InitVars are included so they can be structured and passed into
+    # `__init__`; they are never read back when unstructuring.
+    attrs = adapted_fields(cl, include_initvars=True)
 
     # We keep track of what we're generating to help with recursive
     # class graphs.

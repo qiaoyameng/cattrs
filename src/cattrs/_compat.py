@@ -6,7 +6,7 @@ from collections.abc import MutableSequence as AbcMutableSequence
 from collections.abc import MutableSet as AbcMutableSet
 from collections.abc import Sequence as AbcSequence
 from collections.abc import Set as AbcSet
-from dataclasses import MISSING, Field, is_dataclass
+from dataclasses import _FIELD, _FIELD_INITVAR, MISSING, Field, InitVar, is_dataclass
 from dataclasses import fields as dataclass_fields
 from functools import partial
 from inspect import signature as _signature
@@ -130,13 +130,38 @@ def fields_dict(type) -> dict[str, Union[Attribute, Field]]:
     return attrs_fields_dict(type)
 
 
-def adapted_fields(cl: type) -> list[Attribute]:
+def _unwrap_initvar(type: Any) -> Any:
+    """Unwrap a `dataclasses.InitVar` annotation into its inner type."""
+    if type is InitVar:
+        # A bare `InitVar` annotation carries no type information.
+        return None
+    if isinstance(type, InitVar):
+        return type.type
+    return type
+
+
+def adapted_fields(cl: type, include_initvars: bool = False) -> list[Attribute]:
     """Return the attrs format of `fields()` for attrs and dataclasses.
 
     Resolves `attrs` stringified annotations, if present.
+
+    :param include_initvars: If true, dataclass `InitVar`s are included
+        (in their `__init__` order), with their types unwrapped. They are
+        not instance attributes, so this is only useful for structuring.
+
+    .. versionadded:: 26.3.0 *include_initvars*
     """
     if is_dataclass(cl):
-        attrs = dataclass_fields(cl)
+        if include_initvars:
+            # `__dataclass_fields__` also contains `InitVar`s and `ClassVar`s,
+            # in the exact order of the generated `__init__` signature.
+            attrs = [
+                f
+                for f in cl.__dataclass_fields__.values()
+                if f._field_type in (_FIELD, _FIELD_INITVAR)
+            ]
+        else:
+            attrs = dataclass_fields(cl)
         if any(isinstance(a.type, str) for a in attrs):
             # Do this conditionally in case `get_type_hints` fails, so
             # users can resolve on their own first.
@@ -161,7 +186,7 @@ def adapted_fields(cl: type) -> list[Attribute]:
                 True,
                 attr.init,
                 True,
-                type=type_hints.get(attr.name, attr.type),
+                type=_unwrap_initvar(type_hints.get(attr.name, attr.type)),
                 alias=attr.name,
                 kw_only=getattr(attr, "kw_only", False),
             )

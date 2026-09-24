@@ -32,6 +32,7 @@ from ._compat import (
     Sequence,
     Set,
     TypeAlias,
+    adapted_fields,
     fields,
     get_final_base,
     get_newtype_base,
@@ -777,7 +778,9 @@ class BaseConverter:
         # For public use.
 
         conv_obj = {}  # Start with a fresh dict, to ignore extra keys.
-        for a in fields(cl):
+        # InitVars are included for dataclasses, since they are `__init__`
+        # parameters; they are simply not read back when unstructuring.
+        for a in adapted_fields(cl, include_initvars=True):
             try:
                 val = obj[a.name]
             except KeyError:
