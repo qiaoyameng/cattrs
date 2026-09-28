@@ -393,3 +393,57 @@ This strategy has been preapplied to the following preconfigured converters:
 ```{versionadded} 23.2.0
 
 ```
+
+## Graph Support Strategy
+
+_Found at {py:class}`cattrs.strategies.GraphSupport`._
+
+The _graph support_ strategy adds explicit, opt-in conversion of object graphs containing shared references and cycles.
+It wraps a converter (leaving the converter's own tree format untouched) and exposes `unstructure`/`structure` methods of its own.
+
+Only declared attrs/dataclass types and the `list`/`dict` containers within them are tracked as graph nodes; scalars and any types with their own hooks are converted by the wrapped converter's existing hooks.
+
+```{doctest} graph
+
+>>> from attrs import define
+>>> from cattrs import Converter
+>>> from cattrs.strategies import GraphSupport
+
+>>> @define
+... class Node:
+...     name: str
+...     child: "Node | None" = None
+
+>>> graph = GraphSupport(Converter())
+
+>>> shared = Node("shared")
+>>> doc = graph.unstructure([shared, shared])
+>>> doc["items"][1]  # the second occurrence is a reference to the first
+{'$ref': 1}
+
+>>> res = graph.structure(doc, list[Node])
+>>> res[0] is res[1]
+True
+```
+
+### Reference format
+
+The first occurrence of a tracked value is a _definition_, every further occurrence a _reference_:
+
+- classes: `{"$type": "<module>.<qualname>", "$id": n, "fields": {...}}`
+- lists: `{"$id": n, "items": [...]}`
+- dicts: `{"$id": n, "entries": {...}}`
+- references: `{"$ref": n}`
+
+Reference ids are allocated per conversion and are only meaningful within a single document; no state is shared between two conversions.
+
+### Safety guarantees
+
+- `$type` names are never imported or otherwise dynamically resolved; a type must be reachable from the target type's annotations, or registered via the `allowed_types` parameter.
+- Duplicate definitions, dangling references and nodes not matching the declared type at their position are rejected with `DuplicateReferenceError`, `DanglingReferenceError` and `GraphTypeMismatchError`.
+- Cycles through mutable classes and containers are rebuilt in two phases.
+  Cycles through frozen classes or classes requiring a custom constructor raise a `GraphCycleError` with the location of the offending reference, instead of bypassing the class's initialization constraints.
+
+```{versionadded} 26.3.0
+
+```

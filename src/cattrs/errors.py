@@ -140,3 +140,61 @@ class ForbiddenExtraKeysError(CattrsError):
             or f"Extra fields in constructor for {self.cl.__name__}: "
             f"{', '.join(sorted(self.extra_fields))}"
         )
+
+
+class GraphConversionError(CattrsError):
+    """Base error for un/structuring object graphs via the graph strategy.
+
+    The `path` attribute locates the offending position within the graph
+    document, for example ``$.items[2].child``.
+    """
+
+    def __init__(self, message: str, path: str | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.path = path
+
+    def __str__(self) -> str:
+        if self.path:
+            return f"{self.message} (at {self.path})"
+        return self.message
+
+
+class UnknownGraphTypeError(GraphConversionError):
+    """A ``$type`` name in the payload is not one of the declared, allowed types.
+
+    Type names are never imported or resolved dynamically; they must be
+    reachable from the target type or registered as allowed types.
+    """
+
+    def __init__(self, type_name: str, path: str | None = None) -> None:
+        super().__init__(f"Unknown graph type {type_name!r}", path)
+        self.type_name = type_name
+
+
+class DuplicateReferenceError(GraphConversionError):
+    """Two definitions in the payload use the same reference ``$id``."""
+
+    def __init__(self, ref_id: int, path: str | None = None) -> None:
+        super().__init__(f"Duplicate definition of reference id {ref_id}", path)
+        self.ref_id = ref_id
+
+
+class DanglingReferenceError(GraphConversionError):
+    """A ``$ref`` points to an id with no preceding definition in this document."""
+
+    def __init__(self, ref_id: int, path: str | None = None) -> None:
+        super().__init__(f"Dangling reference to undefined id {ref_id}", path)
+        self.ref_id = ref_id
+
+
+class GraphTypeMismatchError(GraphConversionError):
+    """A graph node or reference does not match the declared type at its position."""
+
+
+class GraphCycleError(GraphConversionError):
+    """A reference cycle cannot be reconstructed without bypassing initialization.
+
+    Raised when a cycle passes through a frozen class or a class requiring a
+    custom constructor, neither of which can be safely rebuilt in two phases.
+    """

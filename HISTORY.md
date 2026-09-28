@@ -13,6 +13,9 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
 
 ## NEXT (UNRELEASED)
 
+- Add the {class}`GraphSupport <cattrs.strategies.GraphSupport>` strategy: explicit opt-in un/structuring of object graphs with shared references and cycles, using a documented inline reference format.
+  Type names in payloads are never imported, reference ids are scoped to a single conversion, and duplicate definitions, dangling references, type mismatches and unreconstructable constructor dependency cycles are rejected with locatable errors.
+
 - Fix heterogeneous tuples and `NamedTuple`s with a member type containing a quote in its `repr`, like `tuple[Literal["a"], int]`, crashing structuring code generation with `SyntaxError`; the index note is now embedded with `repr`.
   ([#777](https://github.com/python-attrs/cattrs/pull/777))
 - Fix {func}`transform_error <cattrs.transform_error>` listing the extra keys of a `ForbiddenExtraKeysError` in set iteration order, which made the message differ between runs; the keys are now sorted, like the error's own `__str__` already sorts them.
