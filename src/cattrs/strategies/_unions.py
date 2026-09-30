@@ -1,14 +1,27 @@
 from collections import defaultdict
+from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any, Callable, Union
 
 from attrs import NOTHING, NothingType
 
 from .. import BaseConverter
-from .._compat import get_newtype_base, is_literal, is_subclass, is_union_type
+from .._compat import (
+    NoneType,
+    adapted_fields,
+    get_newtype_base,
+    get_origin,
+    has,
+    is_literal,
+    is_subclass,
+    is_union_type,
+)
+from ..errors import UnionProbingError
 from ..typealiases import get_type_alias_base, is_type_alias
 
 __all__ = [
     "configure_tagged_union",
+    "configure_union_probing",
     "configure_union_passthrough",
     "default_tag_generator",
 ]
@@ -292,3 +305,107 @@ def configure_union_passthrough(
     converter.register_structure_hook_factory(
         contains_native_union, make_structure_native_union
     )
+
+
+def configure_union_probing(
+    union: Any,
+    converter: BaseConverter,
+    prefilter: Union[Callable[[Any, Any], bool], None] = None,
+) -> None:
+    """
+    Configure the converter to structure `union` by probing its members:
+    each applicable member is tried independently, and the value is returned
+    if exactly one member structures it successfully.
+
+    This strategy is intended for unions of similar classes (for example,
+    _attrs_ classes without unique required fields) where a discriminator
+    cannot be added to the payload and the default unique-field
+    disambiguation cannot tell the members apart.
+
+    Before probing, members which obviously cannot apply are filtered out
+    by convention:
+
+    * `None` (the value) only matches `NoneType`, and `NoneType` only
+      matches `None`.
+    * for _attrs_ classes and dataclasses, if the value is a mapping it must
+      contain all of the class's required (default-less) fields, by field
+      name or alias.
+
+    A custom `prefilter` callable, called with the value and a union member
+    and returning a boolean, can be supplied to replace these conventions.
+
+    Each remaining member is then tried with its own deep copy of the value,
+    so hooks mutating their input cannot affect subsequent members. Note,
+    however, that any external side effects of hooks (writing to files,
+    databases, or other state outside the input value) cannot be rolled
+    back, and hooks may run more than once for a single value.
+
+    The result does not depend on the order of the union members:
+
+    * if exactly one member succeeds, its result is returned;
+    * if more than one member succeeds, a
+      :class:`UnionProbingError <cattrs.errors.UnionProbingError>` is raised
+      for ambiguity;
+    * if no member succeeds, a
+      :class:`UnionProbingError <cattrs.errors.UnionProbingError>` is raised
+      containing the exception of each member that was tried.
+
+    :param union: The union (or a type alias of one) to configure.
+    :param converter: The converter to apply the strategy to.
+    :param prefilter: An optional callable replacing the default
+        convention-based prefilter.
+
+    .. versionadded:: 26.3.0
+    """
+    if is_type_alias(union):
+        union = union.__value__
+    args = union.__args__
+
+    if prefilter is None:
+        def prefilter(val: Any, member: Any) -> bool:
+            """Filter out members which obviously cannot apply."""
+            if member is NoneType:
+                return val is None
+            if val is None:
+                return False
+            if isinstance(val, Mapping) and has(get_origin(member) or member):
+                keys = val.keys()
+                return all(
+                    f.name in keys or (f.alias or f.name) in keys
+                    for f in adapted_fields(get_origin(member) or member)
+                    if f.default is NOTHING
+                )
+            return True
+
+    def structure_union_probing(val: Any, _: Any) -> union:
+        successes: dict[Any, Any] = {}
+        failures: dict[Any, Exception] = {}
+        for member in args:
+            if not prefilter(val, member):
+                continue
+            if member is NoneType:
+                successes[member] = None
+                continue
+            try:
+                successes[member] = converter.structure(deepcopy(val), member)
+            except Exception as exc:
+                failures[member] = exc
+        if len(successes) == 1:
+            return next(iter(successes.values()))
+        if successes:
+            names = ", ".join(getattr(m, "__name__", repr(m)) for m in successes)
+            raise UnionProbingError(
+                f"Ambiguous: {len(successes)} members of {union!r} "
+                f"successfully structured {val!r}: {names}",
+                union,
+                successes,
+                failures,
+            )
+        raise UnionProbingError(
+            f"No member of {union!r} could structure {val!r}",
+            union,
+            successes,
+            failures,
+        )
+
+    converter.register_structure_hook(union, structure_union_probing)

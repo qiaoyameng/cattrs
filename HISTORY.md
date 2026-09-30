@@ -13,6 +13,8 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
 
 ## NEXT (UNRELEASED)
 
+- Add the {func}`union probing strategy <cattrs.strategies.configure_union_probing>` for unions which cannot use a discriminator and whose members lack unique required fields: applicable members are tried independently (each with its own copy of the input), exactly one success is returned, multiple successes raise, and total failure reports each member's error via {class}`UnionProbingError <cattrs.errors.UnionProbingError>`.
+  ([#778](https://github.com/python-attrs/cattrs/pull/778))
 - Fix heterogeneous tuples and `NamedTuple`s with a member type containing a quote in its `repr`, like `tuple[Literal["a"], int]`, crashing structuring code generation with `SyntaxError`; the index note is now embedded with `repr`.
   ([#777](https://github.com/python-attrs/cattrs/pull/777))
 - Fix {func}`transform_error <cattrs.transform_error>` listing the extra keys of a `ForbiddenExtraKeysError` in set iteration order, which made the message differ between runs; the keys are now sorted, like the error's own `__str__` already sorts them.

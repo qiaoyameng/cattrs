@@ -9,6 +9,7 @@ from .errors import (
     IterableValidationError,
     IterableValidationNote,
     StructureHandlerNotFoundError,
+    UnionProbingError,
 )
 from .gen import override
 from .types import SimpleStructureHook
@@ -26,6 +27,7 @@ __all__ = [
     "IterableValidationNote",
     "SimpleStructureHook",
     "StructureHandlerNotFoundError",
+    "UnionProbingError",
     "UnstructureStrategy",
     "get_structure_hook",
     "get_unstructure_hook",

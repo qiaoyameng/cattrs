@@ -330,6 +330,63 @@ Nested(m=MyClass(a=43))
 
 ```
 
+## Union Probing
+
+_Found at {py:func}`cattrs.strategies.configure_union_probing`._
+
+Sometimes a discriminator cannot be added to the payload (for example, when
+integrating with an external API), and the union members have no unique
+required fields for the default disambiguation to work with.
+The _union probing_ strategy structures such unions by trial: each applicable
+member is tried independently, and the result is returned if exactly one
+member succeeds.
+
+Before probing, members which obviously cannot apply are filtered out by
+convention: `None` only matches `NoneType`, and _attrs_ classes and
+dataclasses require all of their default-less fields to be present in a
+mapping payload.
+A custom `prefilter` callable can be supplied to replace these conventions.
+
+```python
+>>> from attrs import define
+>>> from cattrs import Converter
+>>> from cattrs.strategies import configure_union_probing
+
+>>> @define
+... class Cat:
+...     name: str
+...     lives: int
+
+>>> @define
+... class Dog:
+...     name: str
+...     bark_volume: int
+
+>>> converter = Converter()
+>>> configure_union_probing(Cat | Dog, converter)
+
+>>> converter.structure({"name": "Felix", "lives": 8}, Cat | Dog)
+Cat(name='Felix', lives=8)
+
+>>> converter.structure({"name": "Rex", "bark_volume": 3}, Cat | Dog)
+Dog(name='Rex', bark_volume=3)
+```
+
+Each member is tried with its own deep copy of the value, so hooks mutating
+their input cannot affect the other members.
+Note, however, that external side effects of hooks (writing to files,
+databases, or other state outside the input value) cannot be rolled back, and
+hooks may run more than once for a single value.
+
+The result never depends on the order of the union members.
+If more than one member structures the value successfully, or none do, a
+{py:class}`UnionProbingError <cattrs.errors.UnionProbingError>` is raised;
+in the latter case it carries the exception of each member that was tried.
+
+```{versionadded} 26.3.0
+
+```
+
 ## Union Passthrough
 
 _Found at {py:func}`cattrs.strategies.configure_union_passthrough`._

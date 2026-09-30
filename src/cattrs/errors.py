@@ -140,3 +140,39 @@ class ForbiddenExtraKeysError(CattrsError):
             or f"Extra fields in constructor for {self.cl.__name__}: "
             f"{', '.join(sorted(self.extra_fields))}"
         )
+
+
+class UnionProbingError(CattrsError):
+    """
+    Raised by the union probing strategy
+    (:func:`cattrs.strategies.configure_union_probing`) when a value cannot be
+    structured into exactly one member of a union.
+
+    This happens either when no union member structures the value successfully,
+    or when more than one does (an ambiguity).
+
+    :ivar union: The union being structured.
+    :ivar successes: A mapping of union members to their successfully
+        structured results. Empty if no member succeeded.
+    :ivar failures: A mapping of union members to the exceptions they raised
+        while attempting to structure the value. Members skipped by the
+        prefilter are not included.
+
+    .. versionadded:: 26.3.0
+    """
+
+    def __init__(
+        self,
+        message: str,
+        union: Any,
+        successes: dict[Any, Any],
+        failures: dict[Any, Exception],
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.union = union
+        self.successes = successes
+        self.failures = failures
+
+    def __str__(self) -> str:
+        return self.message
