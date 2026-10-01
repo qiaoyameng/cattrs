@@ -76,6 +76,29 @@ class IterableValidationError(BaseValidationError):
         return excs_with_notes, other_excs
 
 
+class MappingKeyCollisionError(CattrsError, ValueError):
+    """Raised when two input mapping keys structure to the same output key."""
+
+    def __init__(
+        self,
+        original_key: Any,
+        existing_original_key: Any,
+        target_key: Any,
+    ) -> None:
+        self.original_key = original_key
+        self.existing_original_key = existing_original_key
+        self.target_key = target_key
+        message = (
+            f"Mapping keys {existing_original_key!r} and {original_key!r} "
+            f"both structure to {target_key!r}"
+        )
+        super().__init__(original_key, existing_original_key, target_key)
+        self.message = message
+
+    def __str__(self) -> str:
+        return self.message
+
+
 class AttributeValidationNote(str):
     """Attached as a note to an exception when an attribute fails structuring."""
 

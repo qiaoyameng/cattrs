@@ -26,6 +26,7 @@ from ..errors import (
     ForbiddenExtraKeysError,
     IterableValidationError,
     IterableValidationNote,
+    MappingKeyCollisionError,
     StructureHandlerNotFoundError,
 )
 from ..fns import identity
@@ -1079,12 +1080,17 @@ def mapping_structure_factory(
     key_type=NOTHING,
     val_type=NOTHING,
     detailed_validation: bool | Literal["from_converter"] = "from_converter",
+    strict_key_validation: (
+        bool | Literal["from_converter"]
+    ) = "from_converter",
 ) -> SimpleStructureHook[Mapping[Any, Any], T]:
     """Generate a specialized structure function for a mapping."""
     fn_name = "structure_mapping"
 
     if detailed_validation == "from_converter":
         detailed_validation = converter.detailed_validation
+    if strict_key_validation == "from_converter":
+        strict_key_validation = getattr(converter, "strict_key_validation", False)
 
     globs: dict[str, type] = {"__cattr_mapping_cl": structure_to}
 
@@ -1154,7 +1160,11 @@ def mapping_structure_factory(
             globs["enumerate"] = enumerate
 
             lines.append("  res = {}; errors = []")
+            if strict_key_validation:
+                lines.append("  key_origins = {}")
             lines.append("  for k, v in mapping.items():")
+            if strict_key_validation:
+                lines.append("    value_error = False")
             lines.append("    try:")
             lines.append(f"      value = {v_s}")
             lines.append("    except Exception as e:")
@@ -1162,10 +1172,26 @@ def mapping_structure_factory(
                 "      e.__notes__ = getattr(e, '__notes__', []) + [IterableValidationNote(f'Structuring mapping value @ key {k!r}', k, val_type)]"
             )
             lines.append("      errors.append(e)")
-            lines.append("      continue")
+            if strict_key_validation:
+                lines.append("      value_error = True")
+            else:
+                lines.append("      continue")
             lines.append("    try:")
             lines.append(f"      key = {k_s}")
-            lines.append("      res[key] = value")
+            if strict_key_validation:
+                lines.append("      try:")
+                lines.append("        existing_key = key_origins[key]")
+                lines.append("      except KeyError:")
+                lines.append("        key_origins[key] = k")
+                lines.append("      else:")
+                lines.append(
+                    "        raise MappingKeyCollisionError(k, existing_key, key)"
+                )
+            if strict_key_validation:
+                lines.append("      if not value_error:")
+                lines.append("        res[key] = value")
+            else:
+                lines.append("      res[key] = value")
             lines.append("    except Exception as e:")
             lines.append(
                 "      e.__notes__ = getattr(e, '__notes__', []) + [IterableValidationNote(f'Structuring mapping key @ key {k!r}', k, key_type)]"
@@ -1175,8 +1201,34 @@ def mapping_structure_factory(
             lines.append(
                 f"    raise IterableValidationError('While structuring ' + {repr(cl)!r}, errors, __cattr_mapping_cl)"
             )
+        elif strict_key_validation:
+            lines.append("  res = {}; key_origins = {}")
+            lines.append("  for k, v in mapping.items():")
+            lines.append(f"    key = {k_s}")
+            lines.append("    try:")
+            lines.append("      existing_key = key_origins[key]")
+            lines.append("    except KeyError:")
+            lines.append("      key_origins[key] = k")
+            lines.append("    else:")
+            lines.append(
+                "      raise MappingKeyCollisionError(k, existing_key, key)"
+            )
+            lines.append(f"    res[key] = {v_s}")
         else:
             lines.append(f"  res = {{{k_s}: {v_s} for k, v in mapping.items()}}")
+    if is_bare_dict and strict_key_validation:
+        # Replace the collision-blind construction with a checked iteration.
+        lines = [
+            "  key_origins = {}",
+            "  for k in mapping:",
+            "    try:",
+            "      existing_key = key_origins[k]",
+            "    except KeyError:",
+            "      key_origins[k] = k",
+            "    else:",
+            "      raise MappingKeyCollisionError(k, existing_key, k)",
+            "  res = dict(mapping)",
+        ]
     if structure_to is not dict:
         lines.append("  res = __cattr_mapping_cl(res)")
 
@@ -1185,6 +1237,7 @@ def mapping_structure_factory(
         internal_arg_line = f", {internal_arg_line}"
     for k, v in internal_arg_parts.items():
         globs[k] = v
+    globs["MappingKeyCollisionError"] = MappingKeyCollisionError
 
     globs["cl"] = cl
     def_line = f"def {fn_name}(mapping, cl=cl{internal_arg_line}):"

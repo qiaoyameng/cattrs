@@ -33,6 +33,7 @@ from ._compat import (
     Set,
     TypeAlias,
     fields,
+    get_args,
     get_final_base,
     get_newtype_base,
     get_origin,
@@ -87,6 +88,7 @@ from .errors import (
     CattrsError,
     IterableValidationError,
     IterableValidationNote,
+    MappingKeyCollisionError,
     StructureHandlerNotFoundError,
 )
 from .fns import Predicate, identity, raise_error
@@ -189,6 +191,7 @@ class BaseConverter:
         "_unstructure_attrs",
         "_unstructure_func",
         "detailed_validation",
+        "strict_key_validation",
     )
 
     def __init__(
@@ -201,10 +204,13 @@ class BaseConverter:
         structure_fallback_factory: HookFactory[StructureHook] = lambda t: raise_error(
             None, t
         ),
+        strict_key_validation: bool = False,
     ) -> None:
         """
         :param detailed_validation: Whether to use a slightly slower mode for detailed
             validation errors.
+        :param strict_key_validation: Whether to raise an error when converted
+            mapping keys collide instead of silently overwriting values.
         :param unstructure_fallback_factory: A hook factory to be called when no
             registered unstructuring hooks match.
         :param structure_fallback_factory: A hook factory to be called when no
@@ -220,6 +226,7 @@ class BaseConverter:
         self._prefer_attrib_converters = prefer_attrib_converters
 
         self.detailed_validation = detailed_validation
+        self.strict_key_validation = strict_key_validation
         self._union_struct_registry: dict[Any, Callable[[Any, type[T]], T]] = {}
 
         # Create a per-instance cache.
@@ -859,6 +866,15 @@ class BaseConverter:
     def _structure_dict(self, obj: Mapping[T, V], cl: Any) -> dict[T, V]:
         """Convert a mapping into a potentially generic dict."""
         if is_bare(cl) or cl.__args__ == (Any, Any):
+            if self.strict_key_validation:
+                key_origins = {}
+                for key in obj:
+                    try:
+                        existing_key = key_origins[key]
+                    except KeyError:
+                        key_origins[key] = key
+                    else:
+                        raise MappingKeyCollisionError(key, existing_key, key)
             return dict(obj)
         key_type, val_type = cl.__args__
 
@@ -867,8 +883,10 @@ class BaseConverter:
             val_handler = self._structure_func.dispatch(val_type)
             errors = []
             res = {}
+            key_origins = {}
 
             for k, v in obj.items():
+                value_error = False
                 try:
                     value = val_handler(v, val_type)
                 except Exception as exc:
@@ -877,11 +895,22 @@ class BaseConverter:
                     )
                     exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
                     errors.append(exc)
-                    continue
+                    value_error = True
 
                 try:
                     key = key_handler(k, key_type)
-                    res[key] = value
+                    if self.strict_key_validation:
+                        target_key = key
+                        try:
+                            existing_key = key_origins[key]
+                        except KeyError:
+                            key_origins[key] = k
+                        else:
+                            raise MappingKeyCollisionError(
+                                k, existing_key, target_key
+                            )
+                    if not value_error:
+                        res[key] = value
                 except Exception as exc:
                     msg = IterableValidationNote(
                         f"Structuring mapping key @ key {k!r}", k, key_type
@@ -893,6 +922,38 @@ class BaseConverter:
                 raise IterableValidationError(f"While structuring {cl!r}", errors, cl)
             return res
 
+        if self.strict_key_validation:
+            res = {}
+            key_origins = {}
+            key_conv = (
+                identity
+                if key_type in ANIES
+                else self._structure_func.dispatch(key_type)
+            )
+            val_conv = (
+                identity
+                if val_type in ANIES
+                else self._structure_func.dispatch(val_type)
+            )
+            for k, v in obj.items():
+                key = key_conv(k) if key_conv is identity else key_conv(k, key_type)
+                target_key = key
+                try:
+                    existing_key = key_origins[key]
+                except KeyError:
+                    key_origins[key] = k
+                else:
+                    raise MappingKeyCollisionError(
+                        k,
+                        existing_key,
+                        target_key,
+                    )
+                res[key] = (
+                    val_conv(v)
+                    if val_conv is identity
+                    else val_conv(v, val_type)
+                )
+            return res
         if key_type in ANIES:
             val_conv = self._structure_func.dispatch(val_type)
             return {k: val_conv(v, val_type) for k, v in obj.items()}
@@ -1020,6 +1081,7 @@ class BaseConverter:
         unstruct_strat: UnstructureStrategy | None = None,
         prefer_attrib_converters: bool | None = None,
         detailed_validation: bool | None = None,
+        strict_key_validation: bool | None = None,
     ) -> Self:
         """Create a copy of the converter, keeping all existing custom hooks.
 
@@ -1046,6 +1108,11 @@ class BaseConverter:
                 detailed_validation
                 if detailed_validation is not None
                 else self.detailed_validation
+            ),
+            strict_key_validation=(
+                strict_key_validation
+                if strict_key_validation is not None
+                else self.strict_key_validation
             ),
         )
 
@@ -1081,6 +1148,7 @@ class Converter(BaseConverter):
             None, t
         ),
         use_alias: bool = False,
+        strict_key_validation: bool = False,
     ):
         """
         :param detailed_validation: Whether to use a slightly slower mode for detailed
@@ -1091,6 +1159,8 @@ class Converter(BaseConverter):
             registered structuring hooks match.
         :param use_alias: Whether to use the field alias instead of the field name as
             the un/structured dictionary key by default.
+        :param strict_key_validation: Whether to raise an error when converted
+            mapping keys collide instead of silently overwriting values.
 
         ..  versionadded:: 23.2.0 *unstructure_fallback_factory*
         ..  versionadded:: 23.2.0 *structure_fallback_factory*
@@ -1106,6 +1176,7 @@ class Converter(BaseConverter):
             detailed_validation=detailed_validation,
             unstructure_fallback_factory=unstructure_fallback_factory,
             structure_fallback_factory=structure_fallback_factory,
+            strict_key_validation=strict_key_validation,
         )
         self.omit_if_default = omit_if_default
         self.forbid_extra_keys = forbid_extra_keys
@@ -1211,7 +1282,7 @@ class Converter(BaseConverter):
         self.register_structure_hook_factory(is_mapping, self.gen_structure_mapping)
         self.register_structure_hook_factory(is_counter, self.gen_structure_counter)
         self.register_structure_hook_factory(
-            is_defaultdict, defaultdict_structure_factory
+            is_defaultdict, self.gen_structure_defaultdict
         )
         self.register_structure_hook_factory(is_typeddict, self.gen_structure_typeddict)
         if AnnotationForwardRef is not None:
@@ -1396,6 +1467,30 @@ class Converter(BaseConverter):
             structure_to=Counter,
             val_type=int,
             detailed_validation=self.detailed_validation,
+            strict_key_validation=self.strict_key_validation,
+        )
+        self._structure_func.register_cls_list([(cl, h)], direct=True)
+        return h
+
+    def gen_structure_defaultdict(self, cl: Any) -> SimpleStructureHook:
+        """Generate a defaultdict structure hook."""
+        if is_bare(cl):
+            h = defaultdict_structure_factory(
+                cl,
+                self,
+                strict_key_validation=self.strict_key_validation,
+            )
+            self._structure_func.register_cls_list([(cl, h)], direct=True)
+            return h
+
+        key_type, val_type = get_args(cl)
+        h = defaultdict_structure_factory(
+            cl,
+            self,
+            default_factory=val_type,
+            key_type=key_type,
+            val_type=val_type,
+            strict_key_validation=self.strict_key_validation,
         )
         self._structure_func.register_cls_list([(cl, h)], direct=True)
         return h
@@ -1412,7 +1507,11 @@ class Converter(BaseConverter):
         ):  # These default to dicts
             structure_to = dict
         h = mapping_structure_factory(
-            cl, self, structure_to, detailed_validation=self.detailed_validation
+            cl,
+            self,
+            structure_to,
+            detailed_validation=self.detailed_validation,
+            strict_key_validation=self.strict_key_validation,
         )
         self._structure_func.register_cls_list([(cl, h)], direct=True)
         return h
@@ -1428,6 +1527,7 @@ class Converter(BaseConverter):
         prefer_attrib_converters: bool | None = None,
         detailed_validation: bool | None = None,
         use_alias: bool | None = None,
+        strict_key_validation: bool | None = None,
     ) -> Self:
         """Create a copy of the converter, keeping all existing custom hooks.
 
@@ -1468,6 +1568,11 @@ class Converter(BaseConverter):
                 else self.detailed_validation
             ),
             use_alias=(use_alias if use_alias is not None else self.use_alias),
+            strict_key_validation=(
+                strict_key_validation
+                if strict_key_validation is not None
+                else self.strict_key_validation
+            ),
         )
 
         self._unstructure_func.copy_to(

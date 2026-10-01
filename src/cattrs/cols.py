@@ -340,6 +340,11 @@ def defaultdict_structure_factory(
     type: type[defaultdict],
     converter: BaseConverter,
     default_factory: Callable[[], Any] | NothingType = NOTHING,
+    key_type=NOTHING,
+    val_type=NOTHING,
+    strict_key_validation: (
+        bool | Literal["from_converter"]
+    ) = "from_converter",
 ) -> StructureHook:
     """A structure hook factory for defaultdicts.
 
@@ -348,5 +353,10 @@ def defaultdict_structure_factory(
     if default_factory is NOTHING:
         default_factory = get_args(type)[1]
     return mapping_structure_factory(
-        type, converter, partial(defaultdict, default_factory)
+        type,
+        converter,
+        partial(defaultdict, default_factory),
+        key_type=key_type,
+        val_type=val_type,
+        strict_key_validation=strict_key_validation,
     )

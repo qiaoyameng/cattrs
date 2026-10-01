@@ -3,6 +3,7 @@ from cattrs.errors import (
     ClassValidationError,
     ForbiddenExtraKeysError,
     IterableValidationError,
+    MappingKeyCollisionError,
     StructureHandlerNotFoundError,
 )
 
@@ -11,5 +12,6 @@ __all__ = [
     "ClassValidationError",
     "ForbiddenExtraKeysError",
     "IterableValidationError",
+    "MappingKeyCollisionError",
     "StructureHandlerNotFoundError",
 ]

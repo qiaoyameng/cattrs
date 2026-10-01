@@ -13,6 +13,10 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
 
 ## NEXT (UNRELEASED)
 
+- Add `strict_key_validation` to converters and `make_mapping_structure_fn`;
+  when enabled, mapping key collisions after structuring raise
+  `MappingKeyCollisionError` with both original keys and the target key instead of
+  silently overwriting values.
 - Fix heterogeneous tuples and `NamedTuple`s with a member type containing a quote in its `repr`, like `tuple[Literal["a"], int]`, crashing structuring code generation with `SyntaxError`; the index note is now embedded with `repr`.
   ([#777](https://github.com/python-attrs/cattrs/pull/777))
 - Fix {func}`transform_error <cattrs.transform_error>` listing the extra keys of a `ForbiddenExtraKeysError` in set iteration order, which made the message differ between runs; the keys are now sorted, like the error's own `__str__` already sorts them.

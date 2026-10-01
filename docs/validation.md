@@ -116,6 +116,31 @@ A useful pattern is wrapping the default, {func}`cattrs.v.format_exception` func
 
 If even more customization is required, {func}`cattrs.transform_error` can be copied over into your codebase and adjusted as needed.
 
+## Strict Mapping Key Validation
+
+Structuring a mapping can turn multiple input keys into the same output key.
+For example, `"1"` and `"01"` both structure to the integer `1`.
+By default the later value silently replaces the earlier one, matching Python dictionaries.
+Initialize a converter with `strict_key_validation=True` to reject these
+collisions instead:
+
+```python
+>>> converter = Converter(
+...     strict_key_validation=True, detailed_validation=False
+... )
+>>> converter.structure({"1": "one", "01": "also one"}, dict[int, str])
+Traceback (most recent call last):
+...
+cattrs.errors.MappingKeyCollisionError: Mapping keys '1' and '01' both structure to 1
+```
+
+The exception exposes `existing_original_key`, `original_key`, and `target_key`.
+Collisions follow Python's hashing and equality rules, so `1` and `True`
+collide when structured into `int`, and an unhashable structured key still
+raises `TypeError`.
+With detailed validation enabled, collision errors are included in the
+{class}`cattrs.IterableValidationError` together with other mapping errors.
+
 ## Non-detailed Validation
 
 Non-detailed validation can be enabled by initializing any of the converters with `detailed_validation=False`.
