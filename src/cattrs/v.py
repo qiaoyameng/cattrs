@@ -4,6 +4,7 @@ from typing import Callable, Union
 
 from .errors import (
     ClassValidationError,
+    DuplicateKeysError,
     ForbiddenExtraKeysError,
     IterableValidationError,
 )
@@ -42,6 +43,11 @@ def format_exception(exc: BaseException, type: Union[type, None]) -> str:
             res = f"invalid value for type, expected {tn}"
     elif isinstance(exc, ForbiddenExtraKeysError):
         res = f"extra fields found ({', '.join(sorted(exc.extra_fields))})"
+    elif isinstance(exc, DuplicateKeysError):
+        res = (
+            f"duplicate key {exc.structured_key!r} from keys "
+            f"{exc.first_key!r} and {exc.duplicate_key!r}"
+        )
     elif isinstance(exc, AttributeError) and exc.args[0].endswith(
         "object has no attribute 'items'"
     ):

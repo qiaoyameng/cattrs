@@ -23,6 +23,7 @@ from ..dispatch import UnstructureHook
 from ..errors import (
     AttributeValidationNote,
     ClassValidationError,
+    DuplicateKeysError,
     ForbiddenExtraKeysError,
     IterableValidationError,
     IterableValidationNote,
@@ -1079,14 +1080,17 @@ def mapping_structure_factory(
     key_type=NOTHING,
     val_type=NOTHING,
     detailed_validation: bool | Literal["from_converter"] = "from_converter",
+    forbid_duplicate_keys: bool | Literal["from_converter"] = "from_converter",
 ) -> SimpleStructureHook[Mapping[Any, Any], T]:
     """Generate a specialized structure function for a mapping."""
     fn_name = "structure_mapping"
 
     if detailed_validation == "from_converter":
         detailed_validation = converter.detailed_validation
+    if forbid_duplicate_keys == "from_converter":
+        forbid_duplicate_keys = converter.forbid_duplicate_keys
 
-    globs: dict[str, type] = {"__cattr_mapping_cl": structure_to}
+    globs: dict[str, Any] = {"__cattr_mapping_cl": structure_to}
 
     lines = []
     internal_arg_parts = {}
@@ -1140,11 +1144,48 @@ def mapping_structure_factory(
 
     if is_bare_dict:
         # No args, it's a bare dict.
-        lines.append("  res = dict(mapping)")
+        if forbid_duplicate_keys:
+            internal_arg_parts["DuplicateKeysError"] = DuplicateKeysError
+            if detailed_validation:
+                internal_arg_parts["IterableValidationError"] = (
+                    IterableValidationError
+                )
+                internal_arg_parts["IterableValidationNote"] = (
+                    IterableValidationNote
+                )
+                lines.append("  res = {}; original_keys = {}; errors = []")
+                lines.append("  for k, v in mapping.items():")
+                lines.append("    try:")
+                lines.append(
+                    "      DuplicateKeysError.check(original_keys, k, k, cl)"
+                )
+                lines.append("      res[k] = v")
+                lines.append("    except Exception as e:")
+                lines.append(
+                    "      e.__notes__ = getattr(e, '__notes__', []) + [IterableValidationNote(f'Structuring mapping key @ key {k!r}', k, cl)]"
+                )
+                lines.append("      errors.append(e)")
+                lines.append(
+                    "  if errors:\n"
+                    "    raise IterableValidationError("
+                    "'While structuring ' + repr(__cattr_mapping_cl), "
+                    "errors, __cattr_mapping_cl)"
+                )
+            else:
+                lines.append("  res = {}; original_keys = {}")
+                lines.append("  for k, v in mapping.items():")
+                lines.append(
+                    "    DuplicateKeysError.check(original_keys, k, k, cl)"
+                )
+                lines.append("    res[k] = v")
+        else:
+            lines.append("  res = dict(mapping)")
     else:
         if detailed_validation:
             internal_arg_parts["IterableValidationError"] = IterableValidationError
             internal_arg_parts["IterableValidationNote"] = IterableValidationNote
+            if forbid_duplicate_keys:
+                internal_arg_parts["DuplicateKeysError"] = DuplicateKeysError
             internal_arg_parts["val_type"] = (
                 val_type if val_type is not NOTHING else Any
             )
@@ -1153,7 +1194,10 @@ def mapping_structure_factory(
             )
             globs["enumerate"] = enumerate
 
-            lines.append("  res = {}; errors = []")
+            if forbid_duplicate_keys:
+                lines.append("  res = {}; original_keys = {}; errors = []")
+            else:
+                lines.append("  res = {}; errors = []")
             lines.append("  for k, v in mapping.items():")
             lines.append("    try:")
             lines.append(f"      value = {v_s}")
@@ -1165,6 +1209,10 @@ def mapping_structure_factory(
             lines.append("      continue")
             lines.append("    try:")
             lines.append(f"      key = {k_s}")
+            if forbid_duplicate_keys:
+                lines.append(
+                    "      DuplicateKeysError.check(original_keys, key, k, cl)"
+                )
             lines.append("      res[key] = value")
             lines.append("    except Exception as e:")
             lines.append(
@@ -1176,7 +1224,18 @@ def mapping_structure_factory(
                 f"    raise IterableValidationError('While structuring ' + {repr(cl)!r}, errors, __cattr_mapping_cl)"
             )
         else:
-            lines.append(f"  res = {{{k_s}: {v_s} for k, v in mapping.items()}}")
+            if forbid_duplicate_keys:
+                internal_arg_parts["DuplicateKeysError"] = DuplicateKeysError
+                lines.append("  res = {}; original_keys = {}")
+                lines.append("  for k, v in mapping.items():")
+                lines.append(f"    value = {v_s}")
+                lines.append(f"    key = {k_s}")
+                lines.append(
+                    "    DuplicateKeysError.check(original_keys, key, k, cl)"
+                )
+                lines.append("    res[key] = value")
+            else:
+                lines.append(f"  res = {{{k_s}: {v_s} for k, v in mapping.items()}}")
     if structure_to is not dict:
         lines.append("  res = __cattr_mapping_cl(res)")
 

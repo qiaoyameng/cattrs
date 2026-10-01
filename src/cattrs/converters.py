@@ -85,6 +85,7 @@ from .dispatch import (
 from .enums import enum_structure_factory, enum_unstructure_factory
 from .errors import (
     CattrsError,
+    DuplicateKeysError,
     IterableValidationError,
     IterableValidationNote,
     StructureHandlerNotFoundError,
@@ -189,6 +190,7 @@ class BaseConverter:
         "_unstructure_attrs",
         "_unstructure_func",
         "detailed_validation",
+        "forbid_duplicate_keys",
     )
 
     def __init__(
@@ -201,10 +203,13 @@ class BaseConverter:
         structure_fallback_factory: HookFactory[StructureHook] = lambda t: raise_error(
             None, t
         ),
+        forbid_duplicate_keys: bool = False,
     ) -> None:
         """
         :param detailed_validation: Whether to use a slightly slower mode for detailed
             validation errors.
+        :param forbid_duplicate_keys: Whether to raise when converted mapping keys
+            collide.
         :param unstructure_fallback_factory: A hook factory to be called when no
             registered unstructuring hooks match.
         :param structure_fallback_factory: A hook factory to be called when no
@@ -220,6 +225,7 @@ class BaseConverter:
         self._prefer_attrib_converters = prefer_attrib_converters
 
         self.detailed_validation = detailed_validation
+        self.forbid_duplicate_keys = forbid_duplicate_keys
         self._union_struct_registry: dict[Any, Callable[[Any, type[T]], T]] = {}
 
         # Create a per-instance cache.
@@ -858,6 +864,28 @@ class BaseConverter:
 
     def _structure_dict(self, obj: Mapping[T, V], cl: Any) -> dict[T, V]:
         """Convert a mapping into a potentially generic dict."""
+        if self.forbid_duplicate_keys and (is_bare(cl) or cl.__args__ == (Any, Any)):
+            errors = [] if self.detailed_validation else None
+            res = {}
+            original_keys = {}
+
+            for k, v in obj.items():
+                try:
+                    DuplicateKeysError.check(original_keys, k, k, cl)
+                    res[k] = v
+                except Exception as exc:
+                    if errors is None:
+                        raise
+                    msg = IterableValidationNote(
+                        f"Structuring mapping key @ key {k!r}", k, Any
+                    )
+                    exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
+                    errors.append(exc)
+
+            if errors:
+                raise IterableValidationError(f"While structuring {cl!r}", errors, cl)
+            return res
+
         if is_bare(cl) or cl.__args__ == (Any, Any):
             return dict(obj)
         key_type, val_type = cl.__args__
@@ -867,6 +895,7 @@ class BaseConverter:
             val_handler = self._structure_func.dispatch(val_type)
             errors = []
             res = {}
+            original_keys: dict[Any, Any] = {}
 
             for k, v in obj.items():
                 try:
@@ -881,6 +910,8 @@ class BaseConverter:
 
                 try:
                     key = key_handler(k, key_type)
+                    if self.forbid_duplicate_keys:
+                        DuplicateKeysError.check(original_keys, key, k, cl)
                     res[key] = value
                 except Exception as exc:
                     msg = IterableValidationNote(
@@ -891,6 +922,17 @@ class BaseConverter:
 
             if errors:
                 raise IterableValidationError(f"While structuring {cl!r}", errors, cl)
+            return res
+
+        if self.forbid_duplicate_keys:
+            key_conv = self._structure_func.dispatch(key_type)
+            val_conv = self._structure_func.dispatch(val_type)
+            res = {}
+            original_keys = {}
+            for k, v in obj.items():
+                key = key_conv(k, key_type)
+                DuplicateKeysError.check(original_keys, key, k, cl)
+                res[key] = val_conv(v, val_type)
             return res
 
         if key_type in ANIES:
@@ -1020,6 +1062,7 @@ class BaseConverter:
         unstruct_strat: UnstructureStrategy | None = None,
         prefer_attrib_converters: bool | None = None,
         detailed_validation: bool | None = None,
+        forbid_duplicate_keys: bool | None = None,
     ) -> Self:
         """Create a copy of the converter, keeping all existing custom hooks.
 
@@ -1046,6 +1089,11 @@ class BaseConverter:
                 detailed_validation
                 if detailed_validation is not None
                 else self.detailed_validation
+            ),
+            forbid_duplicate_keys=(
+                forbid_duplicate_keys
+                if forbid_duplicate_keys is not None
+                else self.forbid_duplicate_keys
             ),
         )
 
@@ -1081,6 +1129,7 @@ class Converter(BaseConverter):
             None, t
         ),
         use_alias: bool = False,
+        forbid_duplicate_keys: bool = False,
     ):
         """
         :param detailed_validation: Whether to use a slightly slower mode for detailed
@@ -1091,6 +1140,8 @@ class Converter(BaseConverter):
             registered structuring hooks match.
         :param use_alias: Whether to use the field alias instead of the field name as
             the un/structured dictionary key by default.
+        :param forbid_duplicate_keys: Whether to raise when converted mapping keys
+            collide.
 
         ..  versionadded:: 23.2.0 *unstructure_fallback_factory*
         ..  versionadded:: 23.2.0 *structure_fallback_factory*
@@ -1106,6 +1157,7 @@ class Converter(BaseConverter):
             detailed_validation=detailed_validation,
             unstructure_fallback_factory=unstructure_fallback_factory,
             structure_fallback_factory=structure_fallback_factory,
+            forbid_duplicate_keys=forbid_duplicate_keys,
         )
         self.omit_if_default = omit_if_default
         self.forbid_extra_keys = forbid_extra_keys
@@ -1396,6 +1448,7 @@ class Converter(BaseConverter):
             structure_to=Counter,
             val_type=int,
             detailed_validation=self.detailed_validation,
+            forbid_duplicate_keys=self.forbid_duplicate_keys,
         )
         self._structure_func.register_cls_list([(cl, h)], direct=True)
         return h
@@ -1412,7 +1465,11 @@ class Converter(BaseConverter):
         ):  # These default to dicts
             structure_to = dict
         h = mapping_structure_factory(
-            cl, self, structure_to, detailed_validation=self.detailed_validation
+            cl,
+            self,
+            structure_to,
+            detailed_validation=self.detailed_validation,
+            forbid_duplicate_keys=self.forbid_duplicate_keys,
         )
         self._structure_func.register_cls_list([(cl, h)], direct=True)
         return h
@@ -1428,6 +1485,7 @@ class Converter(BaseConverter):
         prefer_attrib_converters: bool | None = None,
         detailed_validation: bool | None = None,
         use_alias: bool | None = None,
+        forbid_duplicate_keys: bool | None = None,
     ) -> Self:
         """Create a copy of the converter, keeping all existing custom hooks.
 
@@ -1468,6 +1526,11 @@ class Converter(BaseConverter):
                 else self.detailed_validation
             ),
             use_alias=(use_alias if use_alias is not None else self.use_alias),
+            forbid_duplicate_keys=(
+                forbid_duplicate_keys
+                if forbid_duplicate_keys is not None
+                else self.forbid_duplicate_keys
+            ),
         )
 
         self._unstructure_func.copy_to(

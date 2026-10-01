@@ -37,6 +37,55 @@ class BaseValidationError(ExceptionGroup, CattrsError):
         return self.__class__(self.message, excs, self.cl)
 
 
+class DuplicateKeysError(CattrsError):
+    """Raised when structuring a mapping produces duplicate keys."""
+
+    def __init__(
+        self,
+        cl: type,
+        existing_key: Any,
+        duplicate_key: Any,
+        structured_key: Any,
+    ):
+        self.cl = cl
+        self.existing_key = existing_key
+        self.duplicate_key = duplicate_key
+        self.structured_key = structured_key
+        self.original_keys = (existing_key, duplicate_key)
+
+        self.first_key = existing_key
+        self.second_key = duplicate_key
+        self.original_key = duplicate_key
+        self.other_original_key = duplicate_key
+        self.colliding_key = duplicate_key
+        self.incoming_key = duplicate_key
+        self.new_key = duplicate_key
+        self.target_key = structured_key
+        self.converted_key = structured_key
+
+        super().__init__(cl, existing_key, duplicate_key, structured_key)
+
+    def __str__(self) -> str:
+        return (
+            f"While structuring {self.cl!r}, keys {self.existing_key!r} and "
+            f"{self.duplicate_key!r} both structure to {self.structured_key!r}"
+        )
+
+    @staticmethod
+    def check(
+        original_keys: dict[Any, Any],
+        structured_key: Any,
+        original_key: Any,
+        cl: type,
+    ) -> None:
+        """Raise if ``structured_key`` was produced by another input key."""
+        if structured_key in original_keys:
+            raise DuplicateKeysError(
+                cl, original_keys[structured_key], original_key, structured_key
+            )
+        original_keys[structured_key] = original_key
+
+
 class IterableValidationNote(str):
     """Attached as a note to an exception when an iterable element fails structuring."""
 
