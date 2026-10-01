@@ -108,6 +108,7 @@ from .typealiases import (
     get_type_alias_base,
     is_type_alias,
     type_alias_structure_factory,
+    type_alias_unstructure_factory,
 )
 from .types import SimpleStructureHook
 
@@ -253,8 +254,8 @@ class BaseConverter:
                 ),
                 (
                     is_type_alias,
-                    lambda t: self.get_unstructure_hook(get_type_alias_base(t)),
-                    True,
+                    type_alias_unstructure_factory,
+                    "extended",
                 ),
                 (is_mapping, self._unstructure_mapping),
                 (is_sequence, self._unstructure_seq),
@@ -1359,7 +1360,7 @@ class Converter(BaseConverter):
             get_origin(cl) or cl, unstructure_to or list
         )
         h = iterable_unstructure_factory(cl, self, unstructure_to=unstructure_to)
-        self._unstructure_func.register_cls_list([(cl, h)], direct=True)
+        self._unstructure_func.register_direct(cl, h)
         return h
 
     def gen_unstructure_hetero_tuple(
@@ -1369,7 +1370,7 @@ class Converter(BaseConverter):
             get_origin(cl) or cl, unstructure_to or tuple
         )
         h = make_hetero_tuple_unstructure_fn(cl, self, unstructure_to=unstructure_to)
-        self._unstructure_func.register_cls_list([(cl, h)], direct=True)
+        self._unstructure_func.register_direct(cl, h)
         return h
 
     def gen_unstructure_mapping(
@@ -1384,7 +1385,7 @@ class Converter(BaseConverter):
         h = mapping_unstructure_factory(
             cl, self, unstructure_to=unstructure_to, key_handler=key_handler
         )
-        self._unstructure_func.register_cls_list([(cl, h)], direct=True)
+        self._unstructure_func.register_direct(cl, h)
         return h
 
     def gen_structure_counter(
@@ -1397,7 +1398,7 @@ class Converter(BaseConverter):
             val_type=int,
             detailed_validation=self.detailed_validation,
         )
-        self._structure_func.register_cls_list([(cl, h)], direct=True)
+        self._structure_func.register_direct(cl, h)
         return h
 
     def gen_structure_mapping(
@@ -1414,7 +1415,7 @@ class Converter(BaseConverter):
         h = mapping_structure_factory(
             cl, self, structure_to, detailed_validation=self.detailed_validation
         )
-        self._structure_func.register_cls_list([(cl, h)], direct=True)
+        self._structure_func.register_direct(cl, h)
         return h
 
     def copy(

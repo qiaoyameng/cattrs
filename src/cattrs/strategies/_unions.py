@@ -1,10 +1,18 @@
 from collections import defaultdict
-from typing import Any, Callable, Union
+from collections.abc import Mapping as AbcMapping
+from typing import Any, Callable, Union, get_origin
 
 from attrs import NOTHING, NothingType
 
 from .. import BaseConverter
-from .._compat import get_newtype_base, is_literal, is_subclass, is_union_type
+from ..errors import StructureHandlerNotFoundError
+from .._compat import (
+    get_newtype_base,
+    is_annotated,
+    is_literal,
+    is_subclass,
+    is_union_type,
+)
 from ..typealiases import get_type_alias_base, is_type_alias
 
 __all__ = [
@@ -180,7 +188,18 @@ def configure_union_passthrough(
     def get_passthrough_base(type: Any) -> Any:
         return get_type_alias_base(type) if is_type_alias(type) else type
 
-    args = {get_passthrough_base(type) for type in union.__args__}
+    def get_supported_base(type: Any) -> Any:
+        base = get_passthrough_base(type)
+        return base.__origin__ if is_annotated(base) else base
+
+    if is_type_alias(union):
+        union = get_passthrough_base(union)
+
+    args = {
+        base
+        for typ in union.__args__
+        if isinstance(base := get_newtype_base(typ) or get_supported_base(typ), type)
+    }
 
     def make_structure_native_union(exact_type: Any) -> Callable:
         # `exact_type` is likely to be a subset of the entire configured union (`args`).
@@ -199,17 +218,65 @@ def configure_union_passthrough(
             for v in t.__args__
         }
 
-        non_literal_classes = {
-            get_newtype_base(t) or get_passthrough_base(t)
+        non_literal_members = [
+            t
             for t in exact_type.__args__
             if not is_literal(t)
-            and ((get_newtype_base(t) or get_passthrough_base(t)) in args)
+        ]
+
+        def passthrough_base(t: Any) -> Any | None:
+            if is_type_alias(t):
+                return None
+            base = get_passthrough_base(t)
+            if is_annotated(base):
+                base = base.__origin__
+            if not isinstance(base, type) or base not in args:
+                return None
+            return base
+
+        def simple_generated_alias_base(t: Any) -> Any | None:
+            if not is_type_alias(t):
+                return None
+            alias_base = get_passthrough_base(t)
+            if is_union_type(alias_base) or is_annotated(alias_base):
+                return None
+            base = get_supported_base(t)
+            return (
+                base
+                if isinstance(base, type)
+                and base in args
+                and getattr(
+                    converter.get_structure_hook(t, cache_result=False),
+                    "_cattrs_generated_type_alias",
+                    False,
+                )
+                else None
+            )
+
+        non_literal_classes = {
+            base
+            for t in non_literal_members
+            if (
+                base := passthrough_base(t) or simple_generated_alias_base(t)
+            )
+            is not None
+        }
+
+        non_literal_classes |= {
+            get_newtype_base(t)
+            for t in exact_type.__args__
+            if not is_literal(t)
+            and get_newtype_base(t) is not None
+            and get_newtype_base(t) in args
         }
 
         # We augment the set of allowed classes with any configured subclasses of
         # the exact subclasses.
         non_literal_classes |= {
-            a for a in args if any(is_subclass(a, c) for c in non_literal_classes)
+            a
+            for a in args
+            if isinstance(a, type)
+            and any(is_subclass(a, c) for c in non_literal_classes)
         }
 
         # We check for spillover - union types not handled by the strategy.
@@ -218,9 +285,9 @@ def configure_union_passthrough(
         spillover = {
             a
             for a in exact_type.__args__
-            if (get_newtype_base(a) or get_passthrough_base(a))
+            if not is_literal(a)
+            and (get_newtype_base(a) or get_supported_base(a))
             not in non_literal_classes
-            and not is_literal(a)
         }
 
         # By default, when floats are part of the union, accept ints too.
@@ -234,23 +301,63 @@ def configure_union_passthrough(
             non_literal_classes.add(int)
 
         if spillover:
-            spillover_type = (
-                Union[tuple(spillover)] if len(spillover) > 1 else next(iter(spillover))
-            )
+            spillover_members = tuple(spillover)
+
+            def structure_spillover(val: Any) -> Any:
+                sequence_candidates = []
+                mapping_candidates = []
+                explicit_candidates = []
+                remaining = []
+                for member in spillover_members:
+                    candidates = [member]
+                    if is_type_alias(member):
+                        base = get_passthrough_base(member)
+                        candidates = (
+                            list(base.__args__) if is_union_type(base) else [base]
+                        )
+
+                    for candidate in candidates:
+                        candidate_origin = get_origin(candidate)
+                        if candidate_origin is list:
+                            sequence_candidates.append(candidate)
+                        elif candidate_origin is dict:
+                            mapping_candidates.append(candidate)
+                        elif is_annotated(candidate):
+                            explicit_candidates.append(candidate)
+                        else:
+                            remaining.append(candidate)
+
+                if isinstance(val, list) and sequence_candidates:
+                    return converter.structure(val, sequence_candidates[0])
+                if isinstance(val, AbcMapping) and mapping_candidates:
+                    return converter.structure(val, mapping_candidates[0])
+                for member in explicit_candidates:
+                    return converter.structure(val, member)
+                if not remaining:
+                    raise TypeError(
+                        f"{val} ({val.__class__}) not part of {exact_type}"
+                    )
+                if len(remaining) == 1:
+                    return converter.structure(val, remaining[0])
+                try:
+                    return converter.structure(val, Union[tuple(remaining)])
+                except StructureHandlerNotFoundError:
+                    raise TypeError(
+                        f"{val} ({val.__class__}) not part of {exact_type}"
+                    ) from None
 
             def structure_native_union(
                 val: Any,
                 _: Any,
                 classes=non_literal_classes,
                 vals=literal_values,
-                converter=converter,
-                spillover=spillover_type,
+                structure_spillover=structure_spillover,
             ) -> exact_type:
                 if val.__class__ in literal_classes and val in vals:
                     return val
                 if val.__class__ in classes:
                     return val
-                return converter.structure(val, spillover)
+                return structure_spillover(val)
 
         else:
 

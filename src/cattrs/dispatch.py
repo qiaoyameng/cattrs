@@ -143,6 +143,10 @@ class MultiStrategyDispatch(Generic[Hook]):
                 self.clear_direct()
         self.dispatch.cache_clear()
 
+    def register_direct(self, typ: TargetType, handler: Hook) -> None:
+        """Register a directly dispatched hook without clearing generated hooks."""
+        self._direct_dispatch[typ] = handler
+
     def register_func_list(
         self,
         pred_and_handler: list[
