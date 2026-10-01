@@ -4,6 +4,7 @@ from typing import Callable, Union
 
 from .errors import (
     ClassValidationError,
+    ColumnValidationError,
     ForbiddenExtraKeysError,
     IterableValidationError,
 )
@@ -85,6 +86,18 @@ def transform_error(
         with_notes, without = exc.group_exceptions()
         for exc, note in with_notes:
             p = f"{path}[{note.index!r}]"
+            if isinstance(exc, (ClassValidationError, IterableValidationError)):
+                errors.extend(transform_error(exc, p, format_exception))
+            else:
+                errors.append(f"{format_exception(exc, note.type)} @ {p}")
+        for exc in without:
+            errors.append(f"{format_exception(exc, None)} @ {path}")
+    elif isinstance(exc, ColumnValidationError):
+        with_notes, without = exc.group_exceptions()
+        for exc, note in with_notes:
+            p = f"{path}[{note.index}]"
+            if note.name:
+                p = f"{p}.{note.name}"
             if isinstance(exc, (ClassValidationError, IterableValidationError)):
                 errors.extend(transform_error(exc, p, format_exception))
             else:

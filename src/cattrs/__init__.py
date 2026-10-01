@@ -1,13 +1,22 @@
 from typing import Final
 
 from .converters import BaseConverter, Converter, GenConverter, UnstructureStrategy
+from .columnar import (
+    ColumnBatch,
+    ColumnStructurePlan,
+    make_column_structure_plan,
+)
 from .errors import (
     AttributeValidationNote,
     BaseValidationError,
     ClassValidationError,
+    ColumnLengthError,
+    ColumnValidationError,
+    ColumnValidationNote,
     ForbiddenExtraKeysError,
     IterableValidationError,
     IterableValidationNote,
+    MissingColumnError,
     StructureHandlerNotFoundError,
 )
 from .gen import override
@@ -19,16 +28,23 @@ __all__ = [
     "BaseConverter",
     "BaseValidationError",
     "ClassValidationError",
+    "ColumnBatch",
+    "ColumnLengthError",
+    "ColumnStructurePlan",
+    "ColumnValidationError",
+    "ColumnValidationNote",
     "Converter",
     "ForbiddenExtraKeysError",
     "GenConverter",
     "IterableValidationError",
     "IterableValidationNote",
+    "MissingColumnError",
     "SimpleStructureHook",
     "StructureHandlerNotFoundError",
     "UnstructureStrategy",
     "get_structure_hook",
     "get_unstructure_hook",
+    "make_column_structure_plan",
     "global_converter",
     "override",
     "register_structure_hook",
@@ -38,6 +54,7 @@ __all__ = [
     "structure",
     "structure_attrs_fromdict",
     "structure_attrs_fromtuple",
+    "structure_columns",
     "transform_error",
     "unstructure",
 ]
@@ -55,3 +72,5 @@ register_unstructure_hook = global_converter.register_unstructure_hook
 register_unstructure_hook_func = global_converter.register_unstructure_hook_func
 get_structure_hook: Final = global_converter.get_structure_hook
 get_unstructure_hook: Final = global_converter.get_unstructure_hook
+make_column_structure_plan = global_converter.make_column_structure_plan
+structure_columns = global_converter.structure_columns

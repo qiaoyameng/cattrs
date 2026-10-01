@@ -485,6 +485,66 @@ Structuring from tuples can also be made the default for specific classes only b
 ```
 
 
+### Columnar Data
+
+```{versionadded} NEXT
+
+```
+
+Column-oriented data can be structured without converting every row into a dict first.
+Create a reusable column-access plan with
+{meth}`Converter.make_column_structure_plan() <cattrs.BaseConverter.make_column_structure_plan>`,
+or use the convenience method
+{meth}`Converter.structure_columns() <cattrs.BaseConverter.structure_columns>`.
+
+```{doctest}
+
+>>> from dataclasses import dataclass
+>>> converter = cattrs.Converter()
+
+>>> @dataclass
+... class Row:
+...     name: str
+...     age: int
+
+>>> converter.structure_columns(
+...     {"name": ["Ada", "Grace"], "age": [36, 85]}, Row
+... )
+[Row(name='Ada', age=36), Row(name='Grace', age=85)]
+```
+
+Column aliases, defaults, optional fields, annotated overrides and registered
+hooks are all honored.
+Missing required columns and unequal lengths are batch-level errors, while
+invalid cells include their row number and field path.
+Pass `on_error="collect"` to continue after invalid rows; successful objects are
+returned with their original row numbers.
+
+```{doctest}
+
+>>> result = converter.structure_columns(
+...     {"name": ["Ada", "Grace"], "age": [36, "bad"]},
+...     Row,
+...     on_error="collect",
+... )
+>>> result.objects
+[Row(name='Ada', age=36)]
+>>> result.rows
+[0]
+```
+
+Pass `batch_size` to process and consume results incrementally.
+
+```{doctest}
+
+>>> for batch in converter.structure_columns(
+...     {"name": ["Ada"], "age": [36]}, Row, batch_size=1000
+... ):
+...     list(batch.objects)
+[Row(name='Ada', age=36)]
+```
+
+
 ### Generics
 
 Generic _attrs_ classes and dataclasses are fully supported, both using `typing.Generic` and [PEP 695](https://peps.python.org/pep-0695/).

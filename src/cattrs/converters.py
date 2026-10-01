@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from collections.abc import Mapping as AbcMapping
 from collections.abc import MutableMapping as AbcMutableMapping
 from dataclasses import Field
@@ -9,7 +9,7 @@ from enum import Enum
 from inspect import Signature
 from inspect import signature as inspect_signature
 from pathlib import Path
-from typing import Any, Optional, Tuple, TypeVar, overload
+from typing import Any, Literal, Optional, Tuple, TypeVar, overload
 
 from attrs import Attribute, resolve_types
 from attrs import has as attrs_has
@@ -72,6 +72,7 @@ from .cols import (
     namedtuple_structure_factory,
     namedtuple_unstructure_factory,
 )
+from .columnar import ColumnBatch, ColumnStructurePlan, make_column_structure_plan
 from .disambiguators import create_default_dis_func, is_supported_union
 from .dispatch import (
     HookFactory,
@@ -599,6 +600,56 @@ class BaseConverter:
     def structure(self, obj: UnstructuredValue, cl: type[T]) -> T:
         """Convert unstructured Python data structures to structured data."""
         return self._structure_func.dispatch(cl)(obj, cl)
+
+    def make_column_structure_plan(self, cl: type[T]) -> ColumnStructurePlan[T]:
+        """Create a reusable plan for structuring rows from named columns."""
+        return make_column_structure_plan(cl, self)
+
+    @overload
+    def structure_columns(
+        self,
+        columns: Mapping[str, Sequence[Any]],
+        cl: type[T],
+        *,
+        batch_size: None = None,
+        on_error: Literal["raise"] = "raise",
+    ) -> list[T]: ...
+
+    @overload
+    def structure_columns(
+        self,
+        columns: Mapping[str, Sequence[Any]],
+        cl: type[T],
+        *,
+        batch_size: None = None,
+        on_error: Literal["collect"],
+    ) -> ColumnBatch[T]: ...
+
+    @overload
+    def structure_columns(
+        self,
+        columns: Mapping[str, Sequence[Any]],
+        cl: type[T],
+        *,
+        batch_size: int,
+        on_error: Literal["raise", "collect"] = "raise",
+    ) -> Iterator[ColumnBatch[T]]: ...
+
+    def structure_columns(
+        self,
+        columns: Mapping[str, Sequence[Any]],
+        cl: type[T],
+        *,
+        batch_size: int | None = None,
+        on_error: Literal["raise", "collect"] = "raise",
+    ) -> list[T] | ColumnBatch[T] | Iterator[ColumnBatch[T]]:
+        """Structure objects from column-oriented sequences."""
+        plan = self.make_column_structure_plan(cl)
+        if batch_size is None:
+            return plan.structure(columns, on_error=on_error)
+        return plan.iter_batches(
+            columns, batch_size=batch_size, on_error=on_error
+        )
 
     def get_structure_hook(self, type: Any, cache_result: bool = True) -> StructureHook:
         """Get the structure hook for the given type.

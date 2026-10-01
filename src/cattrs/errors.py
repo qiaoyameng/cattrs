@@ -76,6 +76,80 @@ class IterableValidationError(BaseValidationError):
         return excs_with_notes, other_excs
 
 
+class ColumnValidationNote(str):
+    """Attached to an exception when a column cell fails structuring."""
+
+    index: int
+    name: str
+    type: Any
+
+    def __new__(
+        cls, string: str, index: int, name: str, type: Any
+    ) -> "ColumnValidationNote":
+        instance = str.__new__(cls, string)
+        instance.index = index
+        instance.name = name
+        instance.type = type
+        return instance
+
+    def __getnewargs__(self) -> tuple[str, int, str, Any]:
+        return (str(self), self.index, self.name, self.type)
+
+
+class MissingColumnError(CattrsError):
+    """Raised when a required column is absent from columnar data."""
+
+    def __init__(self, cl: type, field_name: str, column_name: str) -> None:
+        self.cl = cl
+        self.field_name = field_name
+        self.column_name = column_name
+        super().__init__(cl, field_name, column_name)
+
+    def __str__(self) -> str:
+        return (
+            f"Missing column {self.column_name!r} for field "
+            f"{self.cl.__name__}.{self.field_name}"
+        )
+
+
+class ColumnLengthError(CattrsError):
+    """Raised when columns do not contain the same number of rows."""
+
+    def __init__(self, cl: type, lengths: dict[str, int]) -> None:
+        self.cl = cl
+        self.lengths = lengths
+        super().__init__(cl, lengths)
+
+    def __str__(self) -> str:
+        details = ", ".join(
+            f"{column!r}: {length}" for column, length in self.lengths.items()
+        )
+        return f"Columns for {self.cl.__name__} have unequal lengths ({details})"
+
+
+class ColumnValidationError(BaseValidationError):
+    """Raised when structuring one or more columnar rows fails."""
+
+    def group_exceptions(
+        self,
+    ) -> tuple[list[tuple[Exception, ColumnValidationNote]], list[Exception]]:
+        """Split the exceptions into cell errors and batch-level errors."""
+        excs_with_notes = []
+        other_excs = []
+        for subexc in self.exceptions:
+            if hasattr(subexc, "__notes__"):
+                for note in subexc.__notes__:
+                    if note.__class__ is ColumnValidationNote:
+                        excs_with_notes.append((subexc, note))
+                        break
+                else:
+                    other_excs.append(subexc)
+            else:
+                other_excs.append(subexc)
+
+        return excs_with_notes, other_excs
+
+
 class AttributeValidationNote(str):
     """Attached as a note to an exception when an attribute fails structuring."""
 
