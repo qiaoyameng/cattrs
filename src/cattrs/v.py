@@ -4,8 +4,12 @@ from typing import Callable, Union
 
 from .errors import (
     ClassValidationError,
+    ColumnRowValidationNote,
+    ColumnValidationNote,
+    ColumnarValidationError,
     ForbiddenExtraKeysError,
     IterableValidationError,
+    MissingColumnError,
 )
 
 __all__ = ["format_exception", "transform_error"]
@@ -24,6 +28,8 @@ def format_exception(exc: BaseException, type: Union[type, None]) -> str:
     * some `AttributeErrors` (special cased for structing mappings)
     """
     if isinstance(exc, KeyError):
+        res = "required field missing"
+    elif isinstance(exc, MissingColumnError):
         res = "required field missing"
     elif isinstance(exc, ValueError):
         if type is not None:
@@ -81,7 +87,29 @@ def transform_error(
     .. versionadded:: 23.1.0
     """
     errors = []
-    if isinstance(exc, IterableValidationError):
+    if isinstance(exc, ColumnarValidationError):
+        with_notes, without = exc.group_exceptions()
+        for subexc, note in with_notes:
+            row_path = f"{path}[{note.row_index}]"
+            if isinstance(note, ColumnValidationNote):
+                field_path = f"{row_path}.{note.field}"
+                if isinstance(subexc, (ClassValidationError, IterableValidationError)):
+                    errors.extend(transform_error(subexc, field_path, format_exception))
+                else:
+                    errors.append(
+                        f"{format_exception(subexc, note.type)} @ {field_path}"
+                    )
+            elif isinstance(subexc, (ClassValidationError, IterableValidationError)):
+                errors.extend(transform_error(subexc, row_path, format_exception))
+            else:
+                errors.append(f"{format_exception(subexc, None)} @ {row_path}")
+        for subexc in without:
+            field_name = getattr(subexc, "field_name", None)
+            error_path = f"{path}.{field_name}" if field_name else path
+            errors.append(
+                f"{format_exception(subexc, None)} @ {error_path}"
+            )
+    elif isinstance(exc, IterableValidationError):
         with_notes, without = exc.group_exceptions()
         for exc, note in with_notes:
             p = f"{path}[{note.index!r}]"

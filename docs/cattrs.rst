@@ -27,6 +27,14 @@ cattrs.cols module
    :undoc-members:
    :show-inheritance:
 
+cattrs.columnar module
+----------------------
+
+.. automodule:: cattrs.columnar
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 cattrs.disambiguators module
 ----------------------------
 

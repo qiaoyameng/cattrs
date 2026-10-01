@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from collections.abc import Mapping as AbcMapping
 from collections.abc import MutableMapping as AbcMutableMapping
 from dataclasses import Field
@@ -72,6 +72,7 @@ from .cols import (
     namedtuple_structure_factory,
     namedtuple_unstructure_factory,
 )
+from .columnar import ColumnStructurePlan, ColumnarResult, ErrorMode
 from .disambiguators import create_default_dis_func, is_supported_union
 from .dispatch import (
     HookFactory,
@@ -599,6 +600,51 @@ class BaseConverter:
     def structure(self, obj: UnstructuredValue, cl: type[T]) -> T:
         """Convert unstructured Python data structures to structured data."""
         return self._structure_func.dispatch(cl)(obj, cl)
+
+    def make_column_structure_plan(self, cl: type[T]) -> ColumnStructurePlan[T]:
+        """Create a reusable column access plan for *cl*.
+
+        ..  versionadded:: 26.2.0
+        """
+        return ColumnStructurePlan(cl, self)
+
+    def structure_columns(
+        self,
+        columns: AbcMapping[str, Any],
+        cl: type[T],
+        *,
+        on_error: ErrorMode | str = ErrorMode.STOP,
+        forbid_extra_columns: bool | None = None,
+    ) -> ColumnarResult[T]:
+        """Structure column-oriented data into *cl*.
+
+        ..  versionadded:: 26.2.0
+        """
+        return self.make_column_structure_plan(cl).structure(
+            columns,
+            on_error=on_error,
+            forbid_extra_columns=forbid_extra_columns,
+        )
+
+    def iter_column_batches(
+        self,
+        columns: AbcMapping[str, Any],
+        cl: type[T],
+        batch_size: int | None = None,
+        *,
+        on_error: ErrorMode | str = ErrorMode.STOP,
+        forbid_extra_columns: bool | None = None,
+    ) -> Iterator[ColumnarResult[T]]:
+        """Iterate structured column-oriented data in batches.
+
+        ..  versionadded:: 26.2.0
+        """
+        return self.make_column_structure_plan(cl).iter_batches(
+            columns,
+            batch_size,
+            on_error=on_error,
+            forbid_extra_columns=forbid_extra_columns,
+        )
 
     def get_structure_hook(self, type: Any, cache_result: bool = True) -> StructureHook:
         """Get the structure hook for the given type.

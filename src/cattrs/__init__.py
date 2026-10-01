@@ -5,10 +5,21 @@ from .errors import (
     AttributeValidationNote,
     BaseValidationError,
     ClassValidationError,
+    ColumnLengthError,
+    ColumnRowValidationNote,
+    ColumnValidationNote,
+    ColumnarValidationError,
     ForbiddenExtraKeysError,
+    InvalidColumnError,
     IterableValidationError,
     IterableValidationNote,
+    MissingColumnError,
     StructureHandlerNotFoundError,
+)
+from .columnar import (
+    ColumnStructurePlan,
+    ColumnarResult,
+    ErrorMode,
 )
 from .gen import override
 from .types import SimpleStructureHook
@@ -19,17 +30,27 @@ __all__ = [
     "BaseConverter",
     "BaseValidationError",
     "ClassValidationError",
+    "ColumnLengthError",
+    "ColumnRowValidationNote",
+    "ColumnStructurePlan",
+    "ColumnValidationNote",
+    "ColumnarResult",
+    "ColumnarValidationError",
     "Converter",
+    "ErrorMode",
     "ForbiddenExtraKeysError",
+    "InvalidColumnError",
     "GenConverter",
     "IterableValidationError",
     "IterableValidationNote",
+    "MissingColumnError",
     "SimpleStructureHook",
     "StructureHandlerNotFoundError",
     "UnstructureStrategy",
     "get_structure_hook",
     "get_unstructure_hook",
     "global_converter",
+    "make_column_structure_plan",
     "override",
     "register_structure_hook",
     "register_structure_hook_func",
@@ -38,6 +59,7 @@ __all__ = [
     "structure",
     "structure_attrs_fromdict",
     "structure_attrs_fromtuple",
+    "structure_columns",
     "transform_error",
     "unstructure",
 ]
@@ -49,6 +71,8 @@ unstructure = global_converter.unstructure
 structure = global_converter.structure
 structure_attrs_fromtuple = global_converter.structure_attrs_fromtuple
 structure_attrs_fromdict = global_converter.structure_attrs_fromdict
+make_column_structure_plan = global_converter.make_column_structure_plan
+structure_columns = global_converter.structure_columns
 register_structure_hook = global_converter.register_structure_hook
 register_structure_hook_func = global_converter.register_structure_hook_func
 register_unstructure_hook = global_converter.register_unstructure_hook
