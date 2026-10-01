@@ -640,6 +640,10 @@ Additionally, `typing.Annotated` types containing `cattrs.override()` are recogn
 [Type aliases](https://docs.python.org/3/library/typing.html#type-aliases) are supported on Python 3.12+ and are handled according to the rules for their underlying type.
 Their hooks can also be overriden using [](customizing.md#predicate-hooks).
 
+Recursive and mutually recursive aliases generate reusable hooks lazily, including different specializations of a generic alias.
+For recursive unions of native JSON-style values, use the [union passthrough strategy](strategies.md#union-passthrough); the strategy also keeps nested collection index/key paths in detailed validation errors.
+Cyclic input values are not specially detected, so recursive hooks follow the normal Python recursive-call behavior (typically raising `RecursionError` for unstructuring cyclic data).
+
 ```{warning}
 Type aliases using [`typing.TypeAlias`](https://docs.python.org/3/library/typing.html#typing.TypeAlias) aren't supported since there is no way at runtime to distinguish them from their underlying types.
 ```

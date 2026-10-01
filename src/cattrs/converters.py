@@ -105,9 +105,9 @@ from .gen.typeddicts import make_dict_structure_fn as make_typeddict_dict_struct
 from .gen.typeddicts import make_dict_unstructure_fn as make_typeddict_dict_unstruct_fn
 from .literals import is_literal_containing_enums
 from .typealiases import (
-    get_type_alias_base,
     is_type_alias,
     type_alias_structure_factory,
+    type_alias_unstructure_factory,
 )
 from .types import SimpleStructureHook
 
@@ -253,8 +253,8 @@ class BaseConverter:
                 ),
                 (
                     is_type_alias,
-                    lambda t: self.get_unstructure_hook(get_type_alias_base(t)),
-                    True,
+                    type_alias_unstructure_factory,
+                    "extended",
                 ),
                 (is_mapping, self._unstructure_mapping),
                 (is_sequence, self._unstructure_seq),

@@ -4,7 +4,14 @@ from typing import Any, Callable, Union
 from attrs import NOTHING, NothingType
 
 from .. import BaseConverter
-from .._compat import get_newtype_base, is_literal, is_subclass, is_union_type
+from .._compat import (
+    get_newtype_base,
+    is_annotated,
+    is_generic,
+    is_literal,
+    is_subclass,
+    is_union_type,
+)
 from ..typealiases import get_type_alias_base, is_type_alias
 
 __all__ = [
@@ -50,7 +57,7 @@ def configure_tagged_union(
         Type aliases of unions are now also supported.
     """
     if is_type_alias(union):
-        union = union.__value__
+        union = get_type_alias_base(union)
     args = union.__args__
 
     tag_to_hook = {}
@@ -175,12 +182,37 @@ def configure_union_passthrough(
         Introduced the `accept_ints_as_floats` parameter.
     .. versionchanged:: 26.2.0
         PEP 695 type aliases are now supported as union members.
+    .. versionchanged:: 26.3.0
+        Recursive and mutually recursive PEP 695 aliases are supported.
     """
 
     def get_passthrough_base(type: Any) -> Any:
-        return get_type_alias_base(type) if is_type_alias(type) else type
+        while is_type_alias(type):
+            type = get_type_alias_base(type)
+        return type
 
-    args = {get_passthrough_base(type) for type in union.__args__}
+    def contains_recursive_alias(type: Any, seen: set[Any]) -> bool:
+        if is_type_alias(type):
+            if type in seen:
+                return True
+            seen.add(type)
+            base = get_passthrough_base(type)
+            return is_union_type(base) and any(
+                contains_recursive_alias(member, seen) for member in base.__args__
+            )
+        if is_annotated(type):
+            return False
+        args = getattr(type, "__args__", ())
+        return any(contains_recursive_alias(arg, seen) for arg in args)
+
+    if is_type_alias(union):
+        union = get_type_alias_base(union)
+
+    args = set()
+    for member in union.__args__:
+        base = get_passthrough_base(member)
+        if not is_annotated(base) and not is_generic(base):
+            args.add(base)
 
     def make_structure_native_union(exact_type: Any) -> Callable:
         # `exact_type` is likely to be a subset of the entire configured union (`args`).
@@ -203,6 +235,7 @@ def configure_union_passthrough(
             get_newtype_base(t) or get_passthrough_base(t)
             for t in exact_type.__args__
             if not is_literal(t)
+            and not is_annotated(get_passthrough_base(t))
             and ((get_newtype_base(t) or get_passthrough_base(t)) in args)
         }
 
@@ -218,10 +251,34 @@ def configure_union_passthrough(
         spillover = {
             a
             for a in exact_type.__args__
-            if (get_newtype_base(a) or get_passthrough_base(a))
-            not in non_literal_classes
-            and not is_literal(a)
+            if not is_literal(a)
+            and (
+                (get_newtype_base(a) or get_passthrough_base(a))
+                not in non_literal_classes
+                or is_annotated(get_passthrough_base(a))
+            )
         }
+        spillover_by_origin = {}
+        spillover_containers = set()
+        for member in spillover:
+            member_base = get_passthrough_base(member)
+            origin = getattr(member_base, "__origin__", member_base)
+            if origin in (list, tuple, set, frozenset, dict):
+                spillover_containers.add(origin)
+            spillover_by_origin.setdefault(origin, member)
+
+        non_container_spillover = tuple(
+            member
+            for member in spillover
+            if getattr(get_passthrough_base(member), "__origin__", None)
+            not in spillover_containers
+        )
+        if len(non_container_spillover) == 1:
+            fallback_spillover = next(iter(non_container_spillover))
+        elif not non_container_spillover:
+            fallback_spillover = None
+        else:
+            fallback_spillover = Union[tuple(non_container_spillover)]
 
         # By default, when floats are part of the union, accept ints too.
         if (
@@ -234,23 +291,28 @@ def configure_union_passthrough(
             non_literal_classes.add(int)
 
         if spillover:
-            spillover_type = (
-                Union[tuple(spillover)] if len(spillover) > 1 else next(iter(spillover))
-            )
-
             def structure_native_union(
                 val: Any,
                 _: Any,
                 classes=non_literal_classes,
                 vals=literal_values,
                 converter=converter,
-                spillover=spillover_type,
+                spillover=spillover_by_origin,
+                containers=spillover_containers,
+                fallback_spillover=fallback_spillover,
             ) -> exact_type:
                 if val.__class__ in literal_classes and val in vals:
                     return val
                 if val.__class__ in classes:
                     return val
-                return converter.structure(val, spillover)
+                spillover_type = (
+                    spillover.get(type(val))
+                    if type(val) in containers
+                    else fallback_spillover
+                )
+                if spillover_type is None:
+                    raise TypeError(f"{val} ({val.__class__}) not part of {_}")
+                return converter.structure(val, spillover_type)
 
         else:
 
@@ -286,9 +348,70 @@ def configure_union_passthrough(
                 if not is_literal(t)
             }
 
-            return (literal_classes | non_literal_types) & args
+            return bool(
+                (literal_classes | non_literal_types) & args
+                or any(
+                    is_annotated(get_passthrough_base(t))
+                    for t in type_args
+                    if not is_literal(t)
+                )
+            )
         return False
 
     converter.register_structure_hook_factory(
         contains_native_union, make_structure_native_union
     )
+
+    needs_unstructure_hook = any(
+        contains_recursive_alias(member, set())
+        or is_annotated(get_passthrough_base(member))
+        for member in union.__args__
+    )
+    if not is_union_type(union) or not needs_unstructure_hook:
+        return
+
+    members_by_origin = {}
+    for member in union.__args__:
+        base = get_passthrough_base(member)
+        origin = getattr(base, "__origin__", base)
+        members_by_origin.setdefault(origin, member)
+
+    def unstructure_native_union(value: Any) -> Any:
+        value_type = type(value)
+        member = members_by_origin.get(value_type)
+        if member is not None and not isinstance(
+            value, (list, tuple, set, frozenset, dict)
+        ):
+            return converter.unstructure(value, member)
+
+        if isinstance(value, (list, tuple, set, frozenset)):
+            for candidate in members_by_origin.values():
+                candidate_base = get_passthrough_base(candidate)
+                candidate_origin = getattr(candidate_base, "__origin__", None)
+                if candidate_origin in (list, tuple, set, frozenset):
+                    return candidate_origin(
+                        converter.unstructure(item, candidate_base.__args__[0])
+                        for item in value
+                    )
+
+        if isinstance(value, dict):
+            for candidate in members_by_origin.values():
+                candidate_base = get_passthrough_base(candidate)
+                if getattr(candidate_base, "__origin__", None) is dict:
+                    key_type, value_type = candidate_base.__args__
+                    return {
+                        converter.unstructure(key, key_type): converter.unstructure(
+                            item, value_type
+                        )
+                        for key, item in value.items()
+                    }
+
+        for candidate in members_by_origin.values():
+            candidate_base = get_passthrough_base(candidate)
+            candidate_origin = getattr(candidate_base, "__origin__", candidate_base)
+            if is_subclass(value_type, candidate_origin):
+                return converter.unstructure(value, candidate)
+
+        return converter.unstructure(value, value_type)
+
+    converter.register_unstructure_hook(union, unstructure_native_union)
