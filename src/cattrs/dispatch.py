@@ -17,9 +17,16 @@ StructuredValue: TypeAlias = Any
 
 StructureHook: TypeAlias = Callable[[UnstructuredValue, TargetType], StructuredValue]
 UnstructureHook: TypeAlias = Callable[[StructuredValue], UnstructuredValue]
+ContextualStructureHook: TypeAlias = Callable[
+    [UnstructuredValue, TargetType, Any], StructuredValue
+]
+ContextualUnstructureHook: TypeAlias = Callable[
+    [StructuredValue, Any], UnstructuredValue
+]
 
 Hook = TypeVar("Hook", StructureHook, UnstructureHook)
 HookFactory: TypeAlias = Callable[[TargetType], Hook]
+HookAdapter: TypeAlias = Callable[[Callable[..., Any]], Callable[..., Any]]
 
 
 @define
@@ -44,6 +51,7 @@ class FunctionDispatch:
     """
 
     _converter: BaseConverter
+    _hook_adapter: HookAdapter | None = None
     _handler_pairs: list[tuple[Predicate, Callable[[Any, Any], Any], bool, bool]] = (
         Factory(list)
     )
@@ -72,10 +80,15 @@ class FunctionDispatch:
             if ch:
                 if is_generator:
                     if takes_converter:
-                        return handler(typ, self._converter)
-                    return handler(typ)
+                        hook = handler(typ, self._converter)
+                    else:
+                        hook = handler(typ)
+                else:
+                    hook = handler
 
-                return handler
+                if self._hook_adapter is not None:
+                    return self._hook_adapter(hook)
+                return hook
         return None
 
     def get_num_fns(self) -> int:
@@ -109,11 +122,14 @@ class MultiStrategyDispatch(Generic[Hook]):
     dispatch: Callable[[TargetType, BaseConverter], Hook]
 
     def __init__(
-        self, fallback_factory: HookFactory[Hook], converter: BaseConverter
+        self,
+        fallback_factory: HookFactory[Hook],
+        converter: BaseConverter,
+        hook_adapter: HookAdapter | None = None,
     ) -> None:
         self._fallback_factory = fallback_factory
         self._direct_dispatch = {}
-        self._function_dispatch = FunctionDispatch(converter)
+        self._function_dispatch = FunctionDispatch(converter, hook_adapter)
         self._single_dispatch = singledispatch(_DispatchNotFound)
         self.dispatch = lru_cache(maxsize=None)(self.dispatch_without_caching)
 
@@ -131,7 +147,12 @@ class MultiStrategyDispatch(Generic[Hook]):
             return direct_dispatch
 
         res = self._function_dispatch.dispatch(typ)
-        return res if res is not None else self._fallback_factory(typ)
+        if res is not None:
+            return res
+        hook = self._fallback_factory(typ)
+        if self._function_dispatch._hook_adapter is not None:
+            return self._function_dispatch._hook_adapter(hook)
+        return hook
 
     def register_cls_list(self, cls_and_handler, direct: bool = False) -> None:
         """Register a class to direct or singledispatch."""

@@ -72,8 +72,16 @@ from .cols import (
     namedtuple_structure_factory,
     namedtuple_unstructure_factory,
 )
+from .context import (
+    INHERIT_CONTEXT,
+    adapt_structure_hook,
+    adapt_unstructure_hook,
+    current_context,
+)
 from .disambiguators import create_default_dis_func, is_supported_union
 from .dispatch import (
+    ContextualStructureHook,
+    ContextualUnstructureHook,
     HookFactory,
     MultiStrategyDispatch,
     StructuredValue,
@@ -152,8 +160,12 @@ AnyStructureHookFactory = TypeVar(
     bound="HookFactory[StructureHook] | ExtendedStructureHookFactory[Converter]",
 )
 
-UnstructureHookT = TypeVar("UnstructureHookT", bound=UnstructureHook)
-StructureHookT = TypeVar("StructureHookT", bound=StructureHook)
+UnstructureHookT = TypeVar(
+    "UnstructureHookT", bound=UnstructureHook | ContextualUnstructureHook
+)
+StructureHookT = TypeVar(
+    "StructureHookT", bound=StructureHook | ContextualStructureHook
+)
 CounterT = TypeVar("CounterT", bound=Counter)
 
 
@@ -231,7 +243,9 @@ class BaseConverter:
             self._structure_attrs = self.structure_attrs_fromtuple
 
         self._unstructure_func = MultiStrategyDispatch(
-            unstructure_fallback_factory, self
+            unstructure_fallback_factory,
+            self,
+            adapt_unstructure_hook,
         )
         self._unstructure_func.register_cls_list(
             [(bytes, identity), (str, identity), (Path, str)]
@@ -261,7 +275,11 @@ class BaseConverter:
                 (is_mutable_set, self._unstructure_seq),
                 (is_frozenset, self._unstructure_seq),
                 (is_literal_containing_enums, self.unstructure),
-                (lambda t: is_subclass(t, Enum), enum_unstructure_factory, "extended"),
+                (
+                    lambda t: is_subclass(t, Enum),
+                    enum_unstructure_factory,
+                    "extended",
+                ),
                 (has, self._unstructure_attrs),
                 (is_union_type, self._unstructure_union),
                 (lambda t: t in ANIES, self.unstructure),
@@ -271,7 +289,11 @@ class BaseConverter:
         # Per-instance register of to-attrs converters.
         # Singledispatch dispatches based on the first argument, so we
         # store the function and switch the arguments in self.loads.
-        self._structure_func = MultiStrategyDispatch(structure_fallback_factory, self)
+        self._structure_func = MultiStrategyDispatch(
+            structure_fallback_factory,
+            self,
+            adapt_structure_hook,
+        )
         self._structure_func.register_func_list(
             [
                 (
@@ -305,7 +327,7 @@ class BaseConverter:
                 (is_optional, self._structure_optional),
                 (
                     lambda t: is_union_type(t) and t in self._union_struct_registry,
-                    self._union_struct_registry.__getitem__,
+                    lambda t: self._union_struct_registry[t],
                     True,
                 ),
                 (lambda t: is_subclass(t, Enum), enum_structure_factory, "extended"),
@@ -328,10 +350,21 @@ class BaseConverter:
         self._unstruct_copy_skip = self._unstructure_func.get_num_fns()
         self._struct_copy_skip = self._structure_func.get_num_fns()
 
-    def unstructure(self, obj: Any, unstructure_as: Any = None) -> Any:
-        return self._unstructure_func.dispatch(
-            obj.__class__ if unstructure_as is None else unstructure_as
-        )(obj)
+    def unstructure(
+        self,
+        obj: Any,
+        unstructure_as: Any = None,
+        context: Any = INHERIT_CONTEXT,
+    ) -> Any:
+        type_ = obj.__class__ if unstructure_as is None else unstructure_as
+        hook = self._unstructure_func.dispatch(type_)
+        if context is INHERIT_CONTEXT:
+            return hook(obj)
+        token = current_context.set(context)
+        try:
+            return hook(obj)
+        finally:
+            current_context.reset(token)
 
     @property
     def unstruct_strat(self) -> UnstructureStrategy:
@@ -346,10 +379,14 @@ class BaseConverter:
     def register_unstructure_hook(self, cls: UnstructureHookT) -> UnstructureHookT: ...
 
     @overload
-    def register_unstructure_hook(self, cls: Any, func: UnstructureHook) -> None: ...
+    def register_unstructure_hook(
+        self, cls: Any, func: UnstructureHook | ContextualUnstructureHook
+    ) -> None: ...
 
     def register_unstructure_hook(
-        self, cls: Any = None, func: UnstructureHook | None = None
+        self,
+        cls: Any = None,
+        func: UnstructureHook | ContextualUnstructureHook | None = None,
     ) -> Callable[[UnstructureHook]] | None:
         """Register a class-to-primitive converter function for a class.
 
@@ -377,23 +414,35 @@ class BaseConverter:
         if attrs_has(cls):
             resolve_types(cls)
         if is_union_type(cls):
-            self._unstructure_func.register_func_list([(lambda t: t == cls, func)])
+            self._unstructure_func.register_func_list(
+                [(lambda t: t == cls, adapt_unstructure_hook(func))]
+            )
         elif is_type_alias(cls):
-            self._unstructure_func.register_func_list([(lambda t: t is cls, func)])
+            self._unstructure_func.register_func_list(
+                [(lambda t: t is cls, adapt_unstructure_hook(func))]
+            )
         elif get_newtype_base(cls) is not None:
             # This is a newtype, so we handle it specially.
-            self._unstructure_func.register_func_list([(lambda t: t is cls, func)])
+            self._unstructure_func.register_func_list(
+                [(lambda t: t is cls, adapt_unstructure_hook(func))]
+            )
         else:
-            self._unstructure_func.register_cls_list([(cls, func)])
+            self._unstructure_func.register_cls_list(
+                [(cls, adapt_unstructure_hook(func))]
+            )
         return None
 
     def register_unstructure_hook_func(
-        self, check_func: Predicate, func: UnstructureHook
+        self,
+        check_func: Predicate,
+        func: UnstructureHook | ContextualUnstructureHook,
     ) -> None:
         """Register a class-to-primitive converter function for a class, using
         a function to check if it's a match.
         """
-        self._unstructure_func.register_func_list([(check_func, func)])
+        self._unstructure_func.register_func_list(
+            [(check_func, adapt_unstructure_hook(func))]
+        )
 
     @overload
     def register_unstructure_hook_factory(
@@ -483,10 +532,14 @@ class BaseConverter:
     def register_structure_hook(self, cl: StructureHookT) -> StructureHookT: ...
 
     @overload
-    def register_structure_hook(self, cl: Any, func: StructureHook) -> None: ...
+    def register_structure_hook(
+        self, cl: Any, func: StructureHook | ContextualStructureHook
+    ) -> None: ...
 
     def register_structure_hook(
-        self, cl: Any, func: StructureHook | None = None
+        self,
+        cl: Any,
+        func: StructureHook | ContextualStructureHook | None = None,
     ) -> None:
         """Register a primitive-to-class converter function for a type.
 
@@ -516,25 +569,35 @@ class BaseConverter:
         if attrs_has(cl):
             resolve_types(cl)
         if is_union_type(cl):
-            self._union_struct_registry[cl] = func
+            self._union_struct_registry[cl] = adapt_structure_hook(func)
             self._structure_func.clear_cache()
         elif is_type_alias(cl):
             # Type aliases are special-cased.
-            self._structure_func.register_func_list([(lambda t: t is cl, func)])
+            self._structure_func.register_func_list(
+                [(lambda t: t is cl, adapt_structure_hook(func))]
+            )
         elif get_newtype_base(cl) is not None:
             # This is a newtype, so we handle it specially.
-            self._structure_func.register_func_list([(lambda t: t is cl, func)])
+            self._structure_func.register_func_list(
+                [(lambda t: t is cl, adapt_structure_hook(func))]
+            )
         else:
-            self._structure_func.register_cls_list([(cl, func)])
+            self._structure_func.register_cls_list(
+                [(cl, adapt_structure_hook(func))]
+            )
         return None
 
     def register_structure_hook_func(
-        self, check_func: Predicate, func: StructureHook
+        self,
+        check_func: Predicate,
+        func: StructureHook | ContextualStructureHook,
     ) -> None:
         """Register a class-to-primitive converter function for a class, using
         a function to check if it's a match.
         """
-        self._structure_func.register_func_list([(check_func, func)])
+        self._structure_func.register_func_list(
+            [(check_func, adapt_structure_hook(func))]
+        )
 
     @overload
     def register_structure_hook_factory(
@@ -596,9 +659,21 @@ class BaseConverter:
         )
         return factory
 
-    def structure(self, obj: UnstructuredValue, cl: type[T]) -> T:
+    def structure(
+        self,
+        obj: UnstructuredValue,
+        cl: type[T],
+        context: Any = INHERIT_CONTEXT,
+    ) -> T:
         """Convert unstructured Python data structures to structured data."""
-        return self._structure_func.dispatch(cl)(obj, cl)
+        hook = self._structure_func.dispatch(cl)
+        if context is INHERIT_CONTEXT:
+            return hook(obj, cl)
+        token = current_context.set(context)
+        try:
+            return hook(obj, cl)
+        finally:
+            current_context.reset(token)
 
     def get_structure_hook(self, type: Any, cache_result: bool = True) -> StructureHook:
         """Get the structure hook for the given type.
@@ -668,7 +743,7 @@ class BaseConverter:
 
         By default, just unstructures the instance.
         """
-        return self._unstructure_func.dispatch(obj.__class__)(obj)
+        return self.unstructure(obj, unstructure_as=obj.__class__)
 
     # Python primitives to classes.
 
@@ -696,12 +771,12 @@ class BaseConverter:
             def structure_attrs_union(obj, _) -> cl:
                 if obj is None:
                     return None
-                return self.structure(obj, dis_fn(obj))
+                return self.structure(obj, dis_fn(obj), context=INHERIT_CONTEXT)
 
         else:
 
             def structure_attrs_union(obj, _):
-                return self.structure(obj, dis_fn(obj))
+                return self.structure(obj, dis_fn(obj), context=INHERIT_CONTEXT)
 
         return structure_attrs_union
 

@@ -19,7 +19,12 @@ from .._compat import (
     is_generic,
 )
 from .._generics import deep_copy_with
-from ..dispatch import UnstructureHook
+from ..context import adapt_structure_hook, adapt_unstructure_hook
+from ..dispatch import (
+    ContextualStructureHook,
+    ContextualUnstructureHook,
+    UnstructureHook,
+)
 from ..errors import (
     AttributeValidationNote,
     ClassValidationError,
@@ -55,8 +60,10 @@ def override(
     omit_if_default: bool | None = None,
     rename: str | None = None,
     omit: bool | None = None,
-    struct_hook: Callable[[Any, Any], Any] | None = None,
-    unstruct_hook: Callable[[Any], Any] | None = None,
+    struct_hook: Callable[[Any, Any], Any] | ContextualStructureHook | None = None,
+    unstruct_hook: (
+        Callable[[Any], Any] | ContextualUnstructureHook | None
+    ) = None,
 ) -> AttributeOverride:
     """Override how a particular field is handled.
 
@@ -145,7 +152,7 @@ def make_dict_unstructure_fn_from_attrs(
         # regenerated.
         handler = None
         if override.unstruct_hook is not None:
-            handler = override.unstruct_hook
+            handler = adapt_unstructure_hook(override.unstruct_hook)
         else:
             if a.type is not None:
                 t = a.type
@@ -446,7 +453,7 @@ def make_dict_structure_fn_from_attrs(
             # regenerated.
             if override.struct_hook is not None:
                 # If the user has requested an override, just use that.
-                handler = override.struct_hook
+                handler = adapt_structure_hook(override.struct_hook)
             else:
                 handler = find_structure_handler(
                     a, t, converter, _cattrs_prefer_attrib_converters
@@ -590,7 +597,7 @@ def make_dict_structure_fn_from_attrs(
             # regenerated.
             if override.struct_hook is not None:
                 # If the user has requested an override, just use that.
-                handler = override.struct_hook
+                handler = adapt_structure_hook(override.struct_hook)
             else:
                 handler = find_structure_handler(
                     a, t, converter, _cattrs_prefer_attrib_converters
@@ -658,7 +665,7 @@ def make_dict_structure_fn_from_attrs(
                 # regenerated.
                 if override.struct_hook is not None:
                     # If the user has requested an override, just use that.
-                    handler = override.struct_hook
+                    handler = adapt_structure_hook(override.struct_hook)
                 else:
                     handler = find_structure_handler(
                         a, t, converter, _cattrs_prefer_attrib_converters
