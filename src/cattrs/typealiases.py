@@ -53,5 +53,7 @@ def type_alias_structure_factory(type: Any, converter: BaseConverter) -> Structu
     res = converter.get_structure_hook(base)
     if res == converter._structure_call:
         # we need to replace the type arg of `structure_call`
-        return lambda v, _, __base=base: __base(v)
-    return lambda v, _, __base=base: res(v, __base)
+        return lambda v, _, *, context=None, __base=base: __base(v)
+    return lambda v, _, *, context=None, __base=base: res(
+        v, __base, context=context
+    )

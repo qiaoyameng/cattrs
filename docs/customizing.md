@@ -39,6 +39,40 @@ do not work with _singledispatch_,
 these methods have special support for these type forms and can be used with them.
 Instead of using _singledispatch_, predicate hooks will automatically be used instead.
 
+### Conversion Context
+
+A single conversion can carry arbitrary per-request data using the keyword-only
+`context` argument:
+
+```python
+converter.unstructure(order, context={"tenant": "acme", "lang": "en"})
+converter.structure(payload, Order, context={"tenant": "acme", "lang": "en"})
+```
+
+Context-aware hooks accept an additional keyword-only `context` argument. The same
+context is passed through nested attrs classes, dataclasses, containers and unions.
+
+```python
+def unstructure_product(product, *, context):
+    return {"name": product.name[context["lang"]]}
+
+def structure_product(data, type_, *, context):
+    return Product(name=data["name"][context["lang"]])
+```
+
+Hooks remain backwards compatible when they only accept the old arguments. When a
+context-aware hook calls the converter recursively, it must explicitly choose
+between inheriting the current context and replacing it:
+
+```python
+converter.unstructure(item, context=context)         # inherit
+converter.structure(data, Item, context=new_context) # replace
+```
+
+Generated hook functions and dispatch caches are keyed only by type, so switching
+contexts between conversions never causes the first tenant or language to leak
+into another conversion.
+
 ### Use as Decorators
 
 {meth}`register_structure_hook() <cattrs.BaseConverter.register_structure_hook>` and {meth}`register_unstructure_hook() <cattrs.BaseConverter.register_unstructure_hook>` can also be used as _decorators_.

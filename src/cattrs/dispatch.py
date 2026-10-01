@@ -6,7 +6,13 @@ from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, TypeVar
 from attrs import Factory, define
 
 from ._compat import TypeAlias
+from .context import (
+    context_aware_structure_hook,
+    context_aware_unstructure_hook,
+    is_unstructure_passthrough,
+)
 from .fns import Predicate
+from .fns import identity
 
 if TYPE_CHECKING:
     from .converters import BaseConverter
@@ -107,31 +113,48 @@ class MultiStrategyDispatch(Generic[Hook]):
     _function_dispatch: FunctionDispatch
     _single_dispatch: Any
     dispatch: Callable[[TargetType, BaseConverter], Hook]
+    _context_adapter: Callable[[Hook], Hook]
 
     def __init__(
-        self, fallback_factory: HookFactory[Hook], converter: BaseConverter
+        self,
+        fallback_factory: HookFactory[Hook],
+        converter: BaseConverter,
+        context_adapter: Callable[[Hook], Hook] | None = None,
     ) -> None:
         self._fallback_factory = fallback_factory
         self._direct_dispatch = {}
         self._function_dispatch = FunctionDispatch(converter)
         self._single_dispatch = singledispatch(_DispatchNotFound)
+        self._context_adapter = context_adapter or (lambda hook: hook)
         self.dispatch = lru_cache(maxsize=None)(self.dispatch_without_caching)
 
     def dispatch_without_caching(self, typ: TargetType) -> Hook:
         """Dispatch on the type but without caching the result."""
+        res = None
         try:
             dispatch = self._single_dispatch.dispatch(typ)
             if dispatch is not _DispatchNotFound:
-                return dispatch
+                res = dispatch
         except Exception:  # noqa: S110
             pass
 
-        direct_dispatch = self._direct_dispatch.get(typ)
-        if direct_dispatch is not None:
-            return direct_dispatch
-
-        res = self._function_dispatch.dispatch(typ)
-        return res if res is not None else self._fallback_factory(typ)
+        if res is None:
+            direct_dispatch = self._direct_dispatch.get(typ)
+            if direct_dispatch is not None:
+                res = direct_dispatch
+            else:
+                res = self._function_dispatch.dispatch(typ)
+                res = res if res is not None else self._fallback_factory(typ)
+        if (
+            res == identity
+            or (
+                self._context_adapter is context_aware_unstructure_hook
+                and is_unstructure_passthrough(res)
+            )
+            or getattr(res, "__cattrs_context_aware__", False)
+        ):
+            return res
+        return self._context_adapter(res)
 
     def register_cls_list(self, cls_and_handler, direct: bool = False) -> None:
         """Register a class to direct or singledispatch."""

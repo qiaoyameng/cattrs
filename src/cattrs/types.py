@@ -1,5 +1,7 @@
 from typing import Protocol, TypeVar
 
+from .context import Context
+
 __all__ = ["SimpleStructureHook"]
 
 In = TypeVar("In")
@@ -9,4 +11,4 @@ T = TypeVar("T")
 class SimpleStructureHook(Protocol[In, T]):
     """A structure hook with an optional (ignored) second argument."""
 
-    def __call__(self, _: In, /, cl=...) -> T: ...
+    def __call__(self, _: In, /, cl=..., *, context: Context = None) -> T: ...

@@ -18,6 +18,11 @@ from .._compat import (
     is_generic,
 )
 from .._generics import deep_copy_with
+from ..context import (
+    context_aware_structure_hook,
+    context_aware_unstructure_hook,
+    is_unstructure_passthrough,
+)
 from ..errors import (
     AttributeValidationNote,
     ClassValidationError,
@@ -132,7 +137,7 @@ def make_dict_unstructure_fn(
                 except RecursionError:
                     # There's a circular reference somewhere down the line
                     handler = converter.unstructure
-            is_identity = handler == identity
+            is_identity = is_unstructure_passthrough(handler)
             if not is_identity:
                 break
         else:
@@ -169,7 +174,7 @@ def make_dict_unstructure_fn(
             # regenerated.
             handler = None
             if override.unstruct_hook is not None:
-                handler = override.unstruct_hook
+                handler = context_aware_unstructure_hook(override.unstruct_hook)
             else:
                 if isinstance(t, TypeVar):
                     if t.__name__ in mapping:
@@ -186,13 +191,15 @@ def make_dict_unstructure_fn(
                         # There's a circular reference somewhere down the line
                         handler = converter.unstructure
 
-            is_identity = handler == identity
+            is_identity = is_unstructure_passthrough(handler)
 
             if not is_identity:
                 unstruct_handler_name = f"__c_unstr_{ix}"
                 globs[unstruct_handler_name] = handler
                 internal_arg_parts[unstruct_handler_name] = handler
-                invoke = f"{unstruct_handler_name}(instance[{attr_name!r}])"
+                invoke = (
+                    f"{unstruct_handler_name}(instance[{attr_name!r}], context=context)"
+                )
             elif override.rename is None:
                 # We're not doing anything to this attribute, so
                 # it'll already be present in the input dict.
@@ -214,7 +221,7 @@ def make_dict_unstructure_fn(
             globs[k] = v
 
         total_lines = [
-            f"def {fn_name}(instance{internal_arg_line}):",
+            f"def {fn_name}(instance, *, context=None{internal_arg_line}):",
             "  res = instance.copy()",
             *lines,
             "  return res",
@@ -362,7 +369,7 @@ def make_dict_structure_fn(
             # regenerated.
             if override.struct_hook is not None:
                 # If the user has requested an override, just use that.
-                handler = override.struct_hook
+                handler = context_aware_structure_hook(override.struct_hook)
             else:
                 handler = find_structure_handler(a, t, converter)
 
@@ -383,9 +390,13 @@ def make_dict_structure_fn(
 
             if handler == converter._structure_call:
                 internal_arg_parts[struct_handler_name] = t
-                lines.append(f"{i}res[{an!r}] = {struct_handler_name}(o[{kn!r}])")
+                lines.append(
+                    f"{i}res[{an!r}] = {struct_handler_name}(o[{kn!r}])"
+                )
             else:
-                lines.append(f"{i}res[{an!r}] = {struct_handler_name}(o[{kn!r}], {tn})")
+                lines.append(
+                    f"{i}res[{an!r}] = {struct_handler_name}(o[{kn!r}], {tn}, context=context)"
+                )
             if override.rename is not None:
                 lines.append(f"{i}del res[{kn!r}]")
             i = i[:-2]
@@ -439,7 +450,7 @@ def make_dict_structure_fn(
                 t = nrb
 
             if override.struct_hook is not None:
-                handler = override.struct_hook
+                handler = context_aware_structure_hook(override.struct_hook)
             else:
                 # For each attribute, we try resolving the type here and now.
                 # If a type is manually overwritten, this function should be
@@ -458,7 +469,7 @@ def make_dict_structure_fn(
                 tn = f"__c_type_{ix}"
                 internal_arg_parts[tn] = t
                 invocation_line = (
-                    f"  res[{an!r}] = {struct_handler_name}(o[{kn!r}], {tn})"
+                    f"  res[{an!r}] = {struct_handler_name}(o[{kn!r}], {tn}, context=context)"
                 )
 
             lines.append(invocation_line)
@@ -487,7 +498,7 @@ def make_dict_structure_fn(
                     t = deep_copy_with(t, mapping, cl)
 
                 if override.struct_hook is not None:
-                    handler = override.struct_hook
+                    handler = context_aware_structure_hook(override.struct_hook)
                 else:
                     # For each attribute, we try resolving the type here and now.
                     # If a type is manually overwritten, this function should be
@@ -510,7 +521,9 @@ def make_dict_structure_fn(
                     tn = f"__c_type_{ix}"
                     internal_arg_parts[tn] = t
                     post_lines.append(
-                        f"    res[{ian!r}] = {struct_handler_name}(o[{kn!r}], {tn})"
+                        f"    res[{ian!r}] = "
+                        f"{struct_handler_name}(o[{kn!r}], "
+                        f"{tn}, context=context)"
                     )
                 if override.rename is not None:
                     lines.append(f"  res.pop({override.rename!r}, None)")
@@ -528,7 +541,7 @@ def make_dict_structure_fn(
         globs[k] = v
 
     total_lines = [
-        f"def {fn_name}(o, _, {internal_arg_line}):",
+        f"def {fn_name}(o, _, *, context=None, {internal_arg_line}):",
         *lines,
         *post_lines,
         "  return res",

@@ -15,7 +15,9 @@ def enum_unstructure_factory(
     Otherwise, we use the value directly.
     """
     if "_value_" in type.__annotations__:
-        return lambda e: converter.unstructure(e.value)
+        return lambda e, *, context=None: converter.unstructure(
+            e.value, context=context
+        )
 
     return lambda e: e.value
 
@@ -31,6 +33,8 @@ def enum_structure_factory(
     if "_value_" in type.__annotations__:
         val_type = type.__annotations__["_value_"]
         val_hook = converter.get_structure_hook(val_type)
-        return lambda v, _: type(val_hook(v, val_type))
+        return lambda v, _, *, context=None: type(
+            val_hook(v, val_type, context=context)
+        )
 
     return lambda v, _: type(v)

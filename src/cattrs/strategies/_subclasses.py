@@ -122,8 +122,10 @@ def _include_subclasses_without_union_strategy(
 
         if subclass_union is None:
 
-            def struct_hook(val: dict, _, _cl=cl, _base_hook=base_struct_hook) -> cl:
-                return _base_hook(val, _cl)
+            def struct_hook(
+                val: dict, _, *, context=None, _cl=cl, _base_hook=base_struct_hook
+            ) -> cl:
+                return _base_hook(val, _cl, context=context)
 
         else:
             dis_fn = converter._get_dis_func(subclass_union, overrides=overrides)
@@ -131,6 +133,8 @@ def _include_subclasses_without_union_strategy(
             def struct_hook(
                 val: dict,
                 _,
+                *,
+                context=None,
                 _c=converter,
                 _cl=cl,
                 _base_hook=base_struct_hook,
@@ -144,11 +148,13 @@ def _include_subclasses_without_union_strategy(
                 """
                 dis_cl = _dis_fn(val)
                 if dis_cl is _cl:
-                    return _base_hook(val, _cl)
-                return _c.structure(val, dis_cl)
+                    return _base_hook(val, _cl, context=context)
+                return _c.structure(val, dis_cl, context=context)
 
         def unstruct_hook(
             val: parent_subclass_tree[0],
+            *,
+            context=None,
             _c=converter,
             _cl=cl,
             _base_hook=base_unstruct_hook,
@@ -159,8 +165,8 @@ def _include_subclasses_without_union_strategy(
             If val is an instance of a subclass, dispatch on its exact runtime type.
             """
             if val.__class__ is _cl:
-                return _base_hook(val)
-            return _c.unstructure(val, unstructure_as=val.__class__)
+                return _base_hook(val, context=context)
+            return _c.unstructure(val, unstructure_as=val.__class__, context=context)
 
         # This needs to use function dispatch, using singledispatch will again
         # match A and all subclasses, which is not what we want.

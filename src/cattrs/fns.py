@@ -16,7 +16,7 @@ def identity(obj: T) -> T:
     return obj
 
 
-def raise_error(_, cl: Any) -> NoReturn:
+def raise_error(_, cl: Any, *, context: Any = None) -> NoReturn:
     """At the bottom of the condition stack, we explode if we can't handle it."""
     msg = f"Unsupported type: {cl!r}. Register a structure hook for it."
     raise StructureHandlerNotFoundError(msg, type_=cl)

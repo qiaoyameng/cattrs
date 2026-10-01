@@ -105,7 +105,9 @@ def list_structure_factory(type: type, converter: BaseConverter) -> StructureHoo
 
     if is_bare(type) or type.__args__[0] in ANIES:
 
-        def structure_list(obj: Iterable[T], _: type = type) -> list[T]:
+        def structure_list(
+            obj: Iterable[T], _: type = type, *, context=None
+        ) -> list[T]:
             return list(obj)
 
         return structure_list
@@ -121,14 +123,19 @@ def list_structure_factory(type: type, converter: BaseConverter) -> StructureHoo
     if converter.detailed_validation:
 
         def structure_list(
-            obj: Iterable[T], _: type = type, _handler=handler, _elem_type=elem_type
+            obj: Iterable[T],
+            _: type = type,
+            *,
+            context=None,
+            _handler=handler,
+            _elem_type=elem_type,
         ) -> list[T]:
             errors = []
             res = []
             ix = 0  # Avoid `enumerate` for performance.
             for e in obj:
                 try:
-                    res.append(handler(e, _elem_type))
+                    res.append(handler(e, _elem_type, context=context))
                 except Exception as e:
                     msg = IterableValidationNote(
                         f"Structuring {type} @ index {ix}", ix, elem_type
@@ -147,9 +154,14 @@ def list_structure_factory(type: type, converter: BaseConverter) -> StructureHoo
     else:
 
         def structure_list(
-            obj: Iterable[T], _: type = type, _handler=handler, _elem_type=elem_type
+            obj: Iterable[T],
+            _: type = type,
+            *,
+            context=None,
+            _handler=handler,
+            _elem_type=elem_type,
         ) -> list[T]:
-            return [_handler(e, _elem_type) for e in obj]
+            return [_handler(e, _elem_type, context=context) for e in obj]
 
     return structure_list
 
@@ -164,7 +176,9 @@ def homogenous_tuple_structure_factory(
 
     if is_bare(type) or type.__args__[0] in ANIES:
 
-        def structure_tuple(obj: Iterable[T], _: type = type) -> tuple[T, ...]:
+        def structure_tuple(
+            obj: Iterable[T], _: type = type, *, context=None
+        ) -> tuple[T, ...]:
             return tuple(obj)
 
         return structure_tuple
@@ -181,15 +195,22 @@ def homogenous_tuple_structure_factory(
         # We have to structure into a list first anyway.
         list_structure = list_structure_factory(type, converter)
 
-        def structure_tuple(obj: Iterable[T], _: type = type) -> tuple[T, ...]:
-            return tuple(list_structure(obj, _))
+        def structure_tuple(
+            obj: Iterable[T], _: type = type, *, context=None
+        ) -> tuple[T, ...]:
+            return tuple(list_structure(obj, _, context=context))
 
     else:
 
         def structure_tuple(
-            obj: Iterable[T], _: type = type, _handler=handler, _elem_type=elem_type
+            obj: Iterable[T],
+            _: type = type,
+            *,
+            context=None,
+            _handler=handler,
+            _elem_type=elem_type,
         ) -> tuple[T, ...]:
-            return tuple([_handler(e, _elem_type) for e in obj])
+            return tuple([_handler(e, _elem_type, context=context) for e in obj])
 
     return structure_tuple
 
@@ -220,7 +241,9 @@ def namedtuple_structure_factory(
     # We delegate to the existing infrastructure for heterogeneous tuples.
     hetero_tuple_type = tuple[tuple(cl.__annotations__.values())]
     base_hook = converter.get_structure_hook(hetero_tuple_type)
-    return lambda v, _: cl(*base_hook(v, hetero_tuple_type))
+    return lambda v, _, *, context=None: cl(
+        *base_hook(v, hetero_tuple_type, context=context)
+    )
 
 
 def _namedtuple_to_attrs(cl: type[tuple]) -> list[Attribute]:
@@ -348,5 +371,7 @@ def defaultdict_structure_factory(
     if default_factory is NOTHING:
         default_factory = get_args(type)[1]
     return mapping_structure_factory(
-        type, converter, partial(defaultdict, default_factory)
+        type,
+        converter,
+        partial(defaultdict, default_factory),
     )

@@ -18,6 +18,11 @@ from .._compat import (
     is_bare_final,
     is_generic,
 )
+from ..context import (
+    context_aware_structure_hook,
+    context_aware_unstructure_hook,
+    is_unstructure_passthrough,
+)
 from .._generics import deep_copy_with
 from ..dispatch import UnstructureHook
 from ..errors import (
@@ -145,7 +150,7 @@ def make_dict_unstructure_fn_from_attrs(
         # regenerated.
         handler = None
         if override.unstruct_hook is not None:
-            handler = override.unstruct_hook
+            handler = context_aware_unstructure_hook(override.unstruct_hook)
         else:
             if a.type is not None:
                 t = a.type
@@ -174,13 +179,15 @@ def make_dict_unstructure_fn_from_attrs(
             else:
                 handler = converter.unstructure
 
-        is_identity = handler == identity
+        is_identity = is_unstructure_passthrough(handler)
 
         if not is_identity:
             unstruct_handler_name = f"__c_unstr_{attr_name}"
             globs[unstruct_handler_name] = handler
             internal_arg_parts[unstruct_handler_name] = handler
-            invoke = f"{unstruct_handler_name}(instance.{attr_name})"
+            invoke = (
+                f"{unstruct_handler_name}(instance.{attr_name}, context=context)"
+            )
         else:
             invoke = f"instance.{attr_name}"
 
@@ -231,7 +238,7 @@ def make_dict_unstructure_fn_from_attrs(
         globs[k] = v
 
     total_lines = (
-        [f"def {fn_name}(instance{internal_arg_line}):"]
+        [f"def {fn_name}(instance, *, context=None{internal_arg_line}):"]
         + ["  res = {"]
         + [f"    {line}" for line in invocation_lines]
         + ["  }"]
@@ -446,7 +453,7 @@ def make_dict_structure_fn_from_attrs(
             # regenerated.
             if override.struct_hook is not None:
                 # If the user has requested an override, just use that.
-                handler = override.struct_hook
+                handler = context_aware_structure_hook(override.struct_hook)
             else:
                 handler = find_structure_handler(
                     a, t, converter, _cattrs_prefer_attrib_converters
@@ -485,7 +492,9 @@ def make_dict_structure_fn_from_attrs(
                         tn = f"__c_type_{an}"
                         internal_arg_parts[tn] = t
                         pi_lines.append(
-                            f"{i}instance.{an} = {struct_handler_name}(o[{kn!r}], {tn})"
+                            f"{i}instance.{an} = "
+                            f"{struct_handler_name}(o[{kn!r}], {tn}, "
+                            "context=context)"
                         )
                 else:
                     pi_lines.append(f"{i}instance.{an} = o[{kn!r}]")
@@ -513,7 +522,9 @@ def make_dict_structure_fn_from_attrs(
                         )
                     else:
                         lines.append(
-                            f"{i}res['{ian}'] = {struct_handler_name}(o[{kn!r}], {type_name})"
+                            f"{i}res['{ian}'] = "
+                            f"{struct_handler_name}(o[{kn!r}], "
+                            f"{type_name}, context=context)"
                         )
                 else:
                     lines.append(f"{i}res['{ian}'] = o[{kn!r}]")
@@ -590,7 +601,7 @@ def make_dict_structure_fn_from_attrs(
             # regenerated.
             if override.struct_hook is not None:
                 # If the user has requested an override, just use that.
-                handler = override.struct_hook
+                handler = context_aware_structure_hook(override.struct_hook)
             else:
                 handler = find_structure_handler(
                     a, t, converter, _cattrs_prefer_attrib_converters
@@ -615,7 +626,9 @@ def make_dict_structure_fn_from_attrs(
                         tn = f"__c_type_{an}"
                         internal_arg_parts[tn] = t
                         pi_line = (
-                            f"  instance.{an} = {struct_handler_name}(o[{kn!r}], {tn})"
+                            f"  instance.{an} = "
+                            f"{struct_handler_name}(o[{kn!r}], {tn}, "
+                            "context=context)"
                         )
                 else:
                     pi_line = f"  instance.{an} = o[{kn!r}]"
@@ -627,11 +640,15 @@ def make_dict_structure_fn_from_attrs(
                     internal_arg_parts[struct_handler_name] = handler
                     if handler == converter._structure_call:
                         internal_arg_parts[struct_handler_name] = t
-                        invocation_line = f"{struct_handler_name}(o[{kn!r}]),"
+                        invocation_line = (
+                            f"{struct_handler_name}(o[{kn!r}]),"
+                        )
                     else:
                         tn = f"__c_type_{an}"
                         internal_arg_parts[tn] = t
-                        invocation_line = f"{struct_handler_name}(o[{kn!r}], {tn}),"
+                        invocation_line = (
+                            f"{struct_handler_name}(o[{kn!r}], {tn}, context=context),"
+                        )
                 else:
                     invocation_line = f"o[{kn!r}],"
 
@@ -658,7 +675,7 @@ def make_dict_structure_fn_from_attrs(
                 # regenerated.
                 if override.struct_hook is not None:
                     # If the user has requested an override, just use that.
-                    handler = override.struct_hook
+                    handler = context_aware_structure_hook(override.struct_hook)
                 else:
                     handler = find_structure_handler(
                         a, t, converter, _cattrs_prefer_attrib_converters
@@ -686,7 +703,9 @@ def make_dict_structure_fn_from_attrs(
                             tn = f"__c_type_{an}"
                             internal_arg_parts[tn] = t
                             pi_lines.append(
-                                f"    instance.{an} = {struct_handler_name}(o[{kn!r}], {tn})"
+                                f"    instance.{an} = "
+                                f"{struct_handler_name}(o[{kn!r}], "
+                                f"{tn}, context=context)"
                             )
                     else:
                         pi_lines.append(f"    instance.{an} = o[{kn!r}]")
@@ -702,7 +721,9 @@ def make_dict_structure_fn_from_attrs(
                             tn = f"__c_type_{an}"
                             internal_arg_parts[tn] = t
                             post_lines.append(
-                                f"    res['{a.alias}'] = {struct_handler_name}(o[{kn!r}], {tn})"
+                                f"    res['{a.alias}'] = "
+                                f"{struct_handler_name}(o[{kn!r}], "
+                                f"{tn}, context=context)"
                             )
                     else:
                         post_lines.append(f"    res['{a.alias}'] = o[{kn!r}]")
@@ -732,7 +753,7 @@ def make_dict_structure_fn_from_attrs(
     globs.update(internal_arg_parts)
 
     total_lines = [
-        f"def {fn_name}(o, _=__cl, {internal_arg_line}):",
+        f"def {fn_name}(o, _=__cl, *, context=None, {internal_arg_line}):",
         *lines,
         *post_lines,
         *instantiation_lines,
@@ -891,7 +912,9 @@ def make_hetero_tuple_structure_fn(
                 internal_arg_parts[struct_handler_name] = t
                 invocation = f"{struct_handler_name}(o[{ix}])"
             else:
-                invocation = f"{struct_handler_name}(o[{ix}], {type_name})"
+                invocation = (
+                    f"{struct_handler_name}(o[{ix}], {type_name}, context=context)"
+                )
             note = f"Structuring {cl} @ index {ix}"
             lines.extend(
                 [
@@ -933,7 +956,9 @@ def make_hetero_tuple_structure_fn(
                 internal_arg_parts[struct_handler_name] = t
                 invocation = f"{struct_handler_name}(o[{ix}])"
             else:
-                invocation = f"{struct_handler_name}(o[{ix}], {type_name})"
+                invocation = (
+                    f"{struct_handler_name}(o[{ix}], {type_name}, context=context)"
+                )
             lines.append(f"    {invocation},")
 
         total_len = len(type_args)
@@ -948,7 +973,9 @@ def make_hetero_tuple_structure_fn(
 
     internal_arg_line = ", ".join([f"{i}={i}" for i in internal_arg_parts])
     globs.update(internal_arg_parts)
-    script = "\n".join([f"def {fn_name}(o, _=__cl, {internal_arg_line}):", *lines])
+    script = "\n".join(
+        [f"def {fn_name}(o, _=__cl, *, context=None, {internal_arg_line}):", *lines]
+    )
 
     fname = generate_unique_filename(
         cl, "structure", lines=script.splitlines() if use_linecache else []
@@ -979,16 +1006,18 @@ def make_hetero_tuple_unstructure_fn(
         globs["__cattr_seq_cl"] = unstructure_to or cl
     lines = []
 
-    lines.append(f"def {fn_name}(tup):")
+    lines.append(f"def {fn_name}(tup, *, context=None):")
     if unstructure_to is not tuple:
         lines.append("    res = __cattr_seq_cl((")
     else:
         lines.append("    res = (")
     for i in range(len(handlers)):
-        if handlers[i] == identity:
+        if is_unstructure_passthrough(handlers[i]):
             lines.append(f"        tup[{i}],")
         else:
-            lines.append(f"        __cattr_u_{i}(tup[{i}]),")
+            lines.append(
+                f"        __cattr_u_{i}(tup[{i}], context=context),"
+            )
 
     if unstructure_to is not tuple:
         lines.append("    ))")
@@ -1017,7 +1046,11 @@ def mapping_unstructure_factory(
     :param unstructure_to: The class to unstructure to; defaults to the
         same class as the mapping being unstructured.
     """
-    kh = key_handler or converter.unstructure
+    kh = (
+        context_aware_unstructure_hook(key_handler)
+        if key_handler
+        else converter.unstructure
+    )
     val_handler = converter.unstructure
 
     fn_name = "unstructure_mapping"
@@ -1032,22 +1065,26 @@ def mapping_unstructure_factory(
             # Probably a Counter
             key_arg, val_arg = args[0], Any
         # We can do the dispatch here and now.
-        kh = key_handler or converter.get_unstructure_hook(key_arg, cache_result=False)
-        if kh == identity:
+        kh = (
+            context_aware_unstructure_hook(key_handler)
+            if key_handler
+            else converter.get_unstructure_hook(key_arg, cache_result=False)
+        )
+        if is_unstructure_passthrough(kh):
             kh = None
 
         val_handler = converter.get_unstructure_hook(val_arg, cache_result=False)
-        if val_handler == identity:
+        if is_unstructure_passthrough(val_handler):
             val_handler = None
 
         origin = get_origin(cl)
 
     globs = {"__cattr_k_u": kh, "__cattr_v_u": val_handler}
 
-    k_u = "__cattr_k_u(k)" if kh is not None else "k"
-    v_u = "__cattr_v_u(v)" if val_handler is not None else "v"
+    k_u = "__cattr_k_u(k, context=context)" if kh is not None else "k"
+    v_u = "__cattr_v_u(v, context=context)" if val_handler is not None else "v"
 
-    lines = [f"def {fn_name}(mapping):"]
+    lines = [f"def {fn_name}(mapping, *, context=None):"]
 
     if unstructure_to is dict or (unstructure_to is None and origin is dict):
         if kh is None and val_handler is None:
@@ -1126,12 +1163,12 @@ def mapping_structure_factory(
             globs["__cattr_k_s"] = key_handler
             globs["__cattr_v_s"] = val_handler
             k_s = (
-                "__cattr_k_s(k, __cattr_k_t)"
+                "__cattr_k_s(k, __cattr_k_t, context=context)"
                 if key_handler != key_type
                 else "__cattr_k_s(k)"
             )
             v_s = (
-                "__cattr_v_s(v, __cattr_v_t)"
+                "__cattr_v_s(v, __cattr_v_t, context=context)"
                 if val_handler != val_type
                 else "__cattr_v_s(v)"
             )
@@ -1187,7 +1224,9 @@ def mapping_structure_factory(
         globs[k] = v
 
     globs["cl"] = cl
-    def_line = f"def {fn_name}(mapping, cl=cl{internal_arg_line}):"
+    def_line = (
+        f"def {fn_name}(mapping, cl=cl, *, context=None{internal_arg_line}):"
+    )
     total_lines = [def_line, *lines, "  return res"]
     script = "\n".join(total_lines)
 
@@ -1222,12 +1261,21 @@ def iterable_unstructure_factory(
             if type_arg is NoDefault:
                 type_arg = Any
         handler = converter.get_unstructure_hook(type_arg, cache_result=False)
-        if handler == identity:
+        if is_unstructure_passthrough(handler):
             # Save ourselves the trouble of iterating over it all.
-            return unstructure_to or cl
+            sequence_type = unstructure_to or cl
 
-    def unstructure_iterable(iterable, _seq_cl=unstructure_to or cl, _hook=handler):
-        return _seq_cl(_hook(i) for i in iterable)
+            def unstructure_iterable(
+                iterable, *, context=None, _seq_cl=sequence_type
+            ):
+                return _seq_cl(iterable)
+
+            return unstructure_iterable
+
+    def unstructure_iterable(
+        iterable, *, context=None, _seq_cl=unstructure_to or cl, _hook=handler
+    ):
+        return _seq_cl(_hook(i, context=context) for i in iterable)
 
     return unstructure_iterable
 

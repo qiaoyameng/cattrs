@@ -67,8 +67,8 @@ def find_structure_handler(
                     # we wrap it so the rest of the toolchain doesn't get
                     # confused.
 
-                    def handler(v, _, _h=handler):
-                        return _h(v, type)
+                    def handler(v, _, *, context=None, _h=handler):
+                        return _h(v, type, context=context)
 
             else:
                 handler = c.get_structure_hook(type, cache_result=False)

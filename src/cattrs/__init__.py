@@ -1,6 +1,7 @@
 from typing import Final
 
 from .converters import BaseConverter, Converter, GenConverter, UnstructureStrategy
+from .context import Context
 from .errors import (
     AttributeValidationNote,
     BaseValidationError,
@@ -19,6 +20,7 @@ __all__ = [
     "BaseConverter",
     "BaseValidationError",
     "ClassValidationError",
+    "Context",
     "Converter",
     "ForbiddenExtraKeysError",
     "GenConverter",
