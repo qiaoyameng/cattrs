@@ -393,3 +393,77 @@ This strategy has been preapplied to the following preconfigured converters:
 ```{versionadded} 23.2.0
 
 ```
+
+## Union Trial
+
+_Found at {py:func}`cattrs.strategies.configure_union_trial`._
+
+The _union trial_ strategy structures a union by independently trying every
+potentially-applicable member. It is intended for unions whose members have no
+common discriminator (so the [tagged unions strategy](#tagged-unions-strategy)
+cannot be used) and no unique required fields (so the
+[default union strategy](unions.md#default-union-strategy) cannot be used).
+
+```python
+>>> from attrs import define
+>>> from cattrs import Converter
+>>> from cattrs.strategies import configure_union_trial
+
+>>> @define
+... class Admin:
+...     permissions: list[str]
+...     role: str = "admin"
+
+>>> @define
+... class User:
+...     email: str
+...     role: str = "user"
+
+>>> converter = Converter()
+>>> configure_union_trial(Admin | User, converter)
+
+>>> converter.structure({"email": "me@example.com"}, Admin | User)
+User(email='me@example.com')
+```
+
+For each value, the strategy:
+
+1. Filters out members which obviously do not apply, by convention: an _attrs_
+   class or dataclass whose required (non-default) fields are not all present
+   in the input mapping cannot apply. Other members (primitives, nested
+   unions...) are kept.
+2. Converts every remaining candidate independently, each on its own deep copy
+   of the input. The result does not depend on the order of the members in the
+   union definition.
+3. Returns the result when exactly one member succeeds.
+4. Raises {py:class}`cattrs.AmbiguousUnionError` when more than one member
+   succeeds (instead of silently picking the first one).
+5. Raises {py:class}`cattrs.UnionStructureError`, carrying the reason for each
+   branch, when all members fail.
+
+```python
+>>> from cattrs import AmbiguousUnionError
+
+>>> converter.structure({"role": "x"}, Admin | User)
+Traceback (most recent call last):
+...
+cattrs.errors.UnionStructureError: Could not structure value as ...
+
+>>> try:
+...     converter.structure(
+...         {"permissions": [], "email": "me@example.com"}, Admin | User
+...     )
+... except AmbiguousUnionError as exc:
+...     print(type(exc).__name__, [m.__name__ for m in exc.members])
+AmbiguousUnionError ['Admin', 'User']
+```
+
+Each branch receives an independent view of the input, so a custom hook
+mutating its input cannot affect another branch. External side effects of hooks
+(files, databases, global state...) cannot be isolated or rolled back.
+
+Nested unions are flattened and their members are tried as candidates.
+
+```{versionadded} 26.2.0
+
+```

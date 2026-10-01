@@ -140,3 +140,61 @@ class ForbiddenExtraKeysError(CattrsError):
             or f"Extra fields in constructor for {self.cl.__name__}: "
             f"{', '.join(sorted(self.extra_fields))}"
         )
+
+
+class AmbiguousUnionError(CattrsError):
+    """
+    Raised when structuring a union and more than one member can successfully
+    structure the same value.
+
+    The successful members are available under :attr:`members` and the values
+    produced for each of them under :attr:`results`.
+    """
+
+    def __init__(
+        self,
+        message: Optional[str],
+        union: Any,
+        members: Sequence[Any],
+        results: Sequence[Any],
+    ) -> None:
+        self.message = message
+        self.union = union
+        self.members = list(members)
+        self.results = list(results)
+        super().__init__(message, union, self.members, self.results)
+
+    def __str__(self) -> str:
+        return self.message or (
+            f"Ambiguous union {self.union!r}: all of "
+            f"{', '.join(repr(m) for m in self.members)} can structure the value"
+        )
+
+
+class UnionStructureError(CattrsError):
+    """
+    Raised when structuring a union and none of its members can structure the
+    value.
+
+    The member types are available under :attr:`members` and the exception
+    raised while trying each of them under :attr:`exceptions`.
+    """
+
+    def __init__(
+        self,
+        message: Optional[str],
+        union: Any,
+        members: Sequence[Any],
+        exceptions: Sequence[BaseException],
+    ) -> None:
+        self.message = message
+        self.union = union
+        self.members = list(members)
+        self.exceptions = list(exceptions)
+        super().__init__(message, union, self.members, self.exceptions)
+
+    def __str__(self) -> str:
+        lines = [self.message or f"Could not structure value as {self.union!r}:"]
+        for member, exc in zip(self.members, self.exceptions):
+            lines.append(f"  {member!r}: {type(exc).__name__}: {exc}")
+        return "\n".join(lines)

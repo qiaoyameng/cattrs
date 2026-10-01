@@ -2,6 +2,7 @@ from typing import Final
 
 from .converters import BaseConverter, Converter, GenConverter, UnstructureStrategy
 from .errors import (
+    AmbiguousUnionError,
     AttributeValidationNote,
     BaseValidationError,
     ClassValidationError,
@@ -9,12 +10,14 @@ from .errors import (
     IterableValidationError,
     IterableValidationNote,
     StructureHandlerNotFoundError,
+    UnionStructureError,
 )
 from .gen import override
 from .types import SimpleStructureHook
 from .v import transform_error
 
 __all__ = [
+    "AmbiguousUnionError",
     "AttributeValidationNote",
     "BaseConverter",
     "BaseValidationError",
@@ -26,6 +29,7 @@ __all__ = [
     "IterableValidationNote",
     "SimpleStructureHook",
     "StructureHandlerNotFoundError",
+    "UnionStructureError",
     "UnstructureStrategy",
     "get_structure_hook",
     "get_unstructure_hook",
