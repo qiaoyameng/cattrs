@@ -1,18 +1,56 @@
 from collections import defaultdict
+from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any, Callable, Union
 
-from attrs import NOTHING, NothingType
+from attrs import NOTHING, NothingType, define, has
 
 from .. import BaseConverter
-from .._compat import get_newtype_base, is_literal, is_subclass, is_union_type
+from .._compat import (
+    fields,
+    get_newtype_base,
+    is_dataclass,
+    is_literal,
+    is_subclass,
+    is_union_type,
+)
 from ..sentinels import is_sentinel
 from ..typealiases import get_type_alias_base, is_type_alias
 
 __all__ = [
+    "UnknownVariant",
     "configure_tagged_union",
     "configure_union_passthrough",
     "default_tag_generator",
 ]
+
+# Fields the wrapper must expose so it can be constructed with `tag` and `value`.
+_UNKNOWN_VARIANT_REQUIRED_FIELDS = frozenset(("tag", "value"))
+
+
+def _get_cl_fields(cl: Any) -> set[str]:
+    """Return the field names of an attrs class or dataclass, otherwise none."""
+    if has(cl) or is_dataclass(cl):
+        return {f.name for f in fields(cl)}
+    return set()
+
+
+@define(frozen=True)
+class UnknownVariant:
+    """A wrapper for a union member with an unrecognized tag.
+
+    ``tag`` is the tag value found in the unstructured payload, and ``value``
+    is the rest of the payload (a copy, without the tag).
+
+    Instances are produced when the tagged union strategy is configured with
+    ``unknown_variant=True`` or ``unknown_variant=UnknownVariant``. They
+    unstructure back into their original wire structure.
+
+    .. versionadded:: NEXT
+    """
+
+    tag: Any
+    value: dict[str, Any]
 
 
 def default_tag_generator(typ: type) -> str:
@@ -26,6 +64,7 @@ def configure_tagged_union(
     tag_generator: Callable[[type], str] = default_tag_generator,
     tag_name: str = "_type",
     default: Union[type, NothingType] = NOTHING,
+    unknown_variant: Union[type, bool, NothingType] = NOTHING,
 ) -> None:
     """
     Configure the converter so that `union` (which should be a union, or a type alias
@@ -41,6 +80,17 @@ def configure_tagged_union(
         unstructured payload. By default, `'_type'`.
     :param default: An optional class to be used if the tag information
         is not present when structuring.
+    :param unknown_variant: An optional class (an attrs class, dataclass or
+        named tuple) used to wrap payloads carrying an unknown tag, or `True`
+        to use the default :class:`UnknownVariant`. When set, structuring a
+        payload with a tag that does not match any union member produces an
+        instance of this class instead of raising, preserving the unknown tag
+        and the raw payload so the original wire structure can be unstructured
+        again. Payloads without a tag still raise `KeyError`, and payloads
+        whose tag is known are still structured through the member hook as
+        strictly as before. When unset (the default), unknown tags raise
+        `KeyError`, matching the historical strict behavior. Cannot be
+        combined with `default`.
 
     The tagged union strategy currently only works with the dict
     un/structuring base strategy.
@@ -49,10 +99,57 @@ def configure_tagged_union(
 
     ..  versionchanged:: 25.1
         Type aliases of unions are now also supported.
+
+    ..  versionchanged:: NEXT
+        Added the `unknown_variant` parameter and the
+        :class:`UnknownVariant` wrapper.
     """
     if is_type_alias(union):
         union = union.__value__
     args = union.__args__
+
+    if unknown_variant is NOTHING or unknown_variant is False:
+        unknown_variant = NOTHING
+    elif unknown_variant is True:
+        unknown_variant = UnknownVariant
+    elif not isinstance(unknown_variant, type):
+        raise TypeError(
+            "`unknown_variant` must be a class, `True` or `False`; got "
+            f"{unknown_variant!r}"
+        )
+
+    if unknown_variant is not NOTHING:
+        if default is not NOTHING:
+            raise ValueError(
+                "`unknown_variant` cannot be combined with `default`; the "
+                "default member already handles unknown tags"
+            )
+        wrapper_fields = _get_cl_fields(unknown_variant)
+        if wrapper_fields:
+            missing = _UNKNOWN_VARIANT_REQUIRED_FIELDS.difference(wrapper_fields)
+            if missing:
+                raise ValueError(
+                    f"`{unknown_variant.__name__}` must define "
+                    f"{sorted(_UNKNOWN_VARIANT_REQUIRED_FIELDS)} fields; missing "
+                    f"{sorted(missing)}"
+                )
+            if tag_name in wrapper_fields:
+                raise ValueError(
+                    f"The tag name {tag_name!r} collides with an "
+                    f"`{unknown_variant.__name__}` field ({sorted(wrapper_fields)})"
+                )
+        for cl in args:
+            if isinstance(cl, type) and is_subclass(cl, unknown_variant):
+                raise ValueError(
+                    f"{cl!r} is also used as the `unknown_variant` wrapper"
+                )
+            conflicts = wrapper_fields.intersection(_get_cl_fields(cl))
+            if conflicts:
+                raise ValueError(
+                    f"{cl!r} defines fields {sorted(conflicts)} which collide "
+                    f"with the `{unknown_variant.__name__}` wrapper fields "
+                    f"{sorted(wrapper_fields)}"
+                )
 
     tag_to_hook = {}
     exact_cl_unstruct_hooks = {}
@@ -96,6 +193,34 @@ def configure_tagged_union(
                     return _tag_to_hook[val[_tag_name]](val)
                 return _dh(val, _default)
 
+    elif unknown_variant is not NOTHING:
+        forbid_extra_keys = getattr(converter, "forbid_extra_keys", False)
+
+        def structure_tagged_union(
+            val: dict,
+            _,
+            _tag_to_hook=tag_to_hook,
+            _tag_name=tag_name,
+            _unknown_variant=unknown_variant,
+            _forbid_extra_keys=forbid_extra_keys,
+        ) -> union:
+            if not isinstance(val, Mapping):
+                raise TypeError(
+                    f"Expected a mapping while structuring a tagged union, got "
+                    f"{val!r} ({type(val).__name__})"
+                )
+            # A missing tag is distinct from an unknown tag and stays strict.
+            tag = val[_tag_name]
+            hook = _tag_to_hook.get(tag)
+            if hook is None:
+                payload = dict(val)
+                payload.pop(_tag_name)
+                return _unknown_variant(tag=tag, value=deepcopy(payload))
+            if _forbid_extra_keys:
+                val = dict(val)
+                val.pop(_tag_name)
+            return hook(val)
+
     else:
         if getattr(converter, "forbid_extra_keys", False):
 
@@ -112,18 +237,50 @@ def configure_tagged_union(
             ) -> union:
                 return _tag_to_cl[val[_tag_name]](val)
 
-    def unstructure_tagged_union(
-        val: union,
-        _exact_cl_unstruct_hooks=exact_cl_unstruct_hooks,
-        _cl_to_tag=cl_to_tag,
-        _tag_name=tag_name,
-    ) -> dict:
-        res = _exact_cl_unstruct_hooks[val.__class__](val)
-        res[_tag_name] = _cl_to_tag[val.__class__]
-        return res
+    if unknown_variant is not NOTHING:
+
+        def unstructure_unknown_variant(val, _tag_name=tag_name) -> dict[str, Any]:
+            res = deepcopy(val.value)
+            res[_tag_name] = val.tag
+            return res
+
+        def unstructure_tagged_union(
+            val: union,
+            _exact_cl_unstruct_hooks=exact_cl_unstruct_hooks,
+            _cl_to_tag=cl_to_tag,
+            _tag_name=tag_name,
+            _unknown_variant=unknown_variant,
+            _unstructure_unknown_variant=unstructure_unknown_variant,
+        ) -> dict:
+            if isinstance(val, _unknown_variant):
+                return _unstructure_unknown_variant(val, _tag_name)
+            res = _exact_cl_unstruct_hooks[val.__class__](val)
+            res[_tag_name] = _cl_to_tag[val.__class__]
+            return res
+
+    else:
+
+        def unstructure_tagged_union(
+            val: union,
+            _exact_cl_unstruct_hooks=exact_cl_unstruct_hooks,
+            _cl_to_tag=cl_to_tag,
+            _tag_name=tag_name,
+        ) -> dict:
+            res = _exact_cl_unstruct_hooks[val.__class__](val)
+            res[_tag_name] = _cl_to_tag[val.__class__]
+            return res
 
     converter.register_unstructure_hook(union, unstructure_tagged_union)
     converter.register_structure_hook(union, structure_tagged_union)
+
+    if unknown_variant is not NOTHING:
+        # Register a class hook too, so unstructuring an `UnknownVariant`
+        # restores the wire structure even when a collection dispatches by
+        # runtime class (as `BaseConverter` does) instead of the declared
+        # union type.
+        converter.register_unstructure_hook(
+            unknown_variant, unstructure_unknown_variant
+        )
 
     for cl in args:
         tag = tag_generator(cl)

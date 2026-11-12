@@ -13,6 +13,7 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
 
 ## NEXT
 
+- {func}`cattrs.strategies.configure_tagged_union` accepts an opt-in `unknown_variant` parameter. When enabled, payloads with an unrecognized tag are wrapped in [`UnknownVariant`](cattrs.strategies.UnknownVariant) (or a supplied custom attrs class/dataclass) preserving the unknown tag and raw payload, so batches containing new event types can be processed and unstructured back into their original wire structure. Known tags keep their strict member structuring, missing tags still raise, and the default behavior is unchanged.
 - Fix the msgspec converter passing typed deques directly to the encoder, which cannot serialize them. Deques are now unstructured into lists, including when nested in attrs classes or dataclasses.
   ([#818](https://github.com/python-attrs/cattrs/issues/818) [#819](https://github.com/python-attrs/cattrs/pull/819))
 

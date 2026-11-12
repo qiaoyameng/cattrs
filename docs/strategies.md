@@ -53,6 +53,27 @@ They may be anything that cattrs can un/structure from/to a dictionary, for exam
 A default member can be specified to be used if the tag is missing or is unknown.
 This is useful for evolving APIs in a backwards-compatible way; an endpoint taking class `A` can be changed to take `A | B` with `A` as the default (for old clients which do not send the tag).
 
+By default, an unknown tag raises a `KeyError`.
+Passing `unknown_variant=True` instead wraps unrecognized payloads in the `UnknownVariant` class, which preserves the unknown tag and the rest of the payload.
+The payload is deep-copied, and the wrapper structures back into its original wire representation, so unknown fields are not lost.
+This makes it possible for an old consumer to process a batch containing event types it does not know about, while known tags still use their normal, strict member hooks.
+A missing tag still raises a `KeyError`, distinguishing an incomplete payload from an unrecognized event type.
+A custom attrs class, dataclass or named tuple may be passed as `unknown_variant` instead of `True`; it is constructed using `tag` and `value` fields.
+`unknown_variant` cannot be combined with `default`, and union members (or tag names) that collide with the wrapper's fields are rejected.
+
+```{doctest} tagged_unions
+
+>>> from cattrs.strategies import UnknownVariant, configure_tagged_union
+>>> configure_tagged_union(A | B, converter, unknown_variant=True)
+
+>>> event = converter.structure({'_type': 'NewEvent', 'x': 1}, A | B)
+>>> event
+UnknownVariant(tag='NewEvent', value={'x': 1})
+
+>>> converter.unstructure(event, unstructure_as=A | B)
+{'x': 1, '_type': 'NewEvent'}
+```
+
 This strategy only applies in the context of the union; the normal un/structuring hooks are left untouched.
 This also means union members can be reused in multiple unions easily.
 

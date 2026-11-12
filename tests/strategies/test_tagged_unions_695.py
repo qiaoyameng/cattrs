@@ -3,7 +3,7 @@ from __future__ import annotations
 from attrs import define
 
 from cattrs import BaseConverter, Converter
-from cattrs.strategies import configure_tagged_union
+from cattrs.strategies import UnknownVariant, configure_tagged_union
 
 from .test_tagged_unions import A, B
 
@@ -19,6 +19,19 @@ def test_type_alias(converter: BaseConverter):
 
     assert converter.structure({"_type": "A", "a": 1}, AOrB) == A(1)
     assert converter.structure({"_type": "B", "a": 1}, AOrB) == B("1")
+
+
+def test_type_alias_unknown_variant(converter: BaseConverter):
+    """The `unknown_variant` option also works with type aliases of unions."""
+    type AOrB = A | B
+
+    configure_tagged_union(AOrB, converter, unknown_variant=True)
+
+    res = converter.structure({"_type": "New", "a": 1}, AOrB)
+    assert isinstance(res, UnknownVariant)
+    assert res.tag == "New"
+    assert res.value == {"a": 1}
+    assert converter.unstructure(res, AOrB) == {"a": 1, "_type": "New"}
 
 
 @define
