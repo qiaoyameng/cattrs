@@ -120,3 +120,60 @@ If even more customization is required, {func}`cattrs.transform_error` can be co
 
 Non-detailed validation can be enabled by initializing any of the converters with `detailed_validation=False`.
 In this mode, any errors during un/structuring will bubble up directly as soon as they happen.
+
+## Conversion Budgets
+
+```{versionadded} NEXT
+
+```
+
+Untrusted input can request an unbounded amount of work: very deeply nested models, very large collections or inputs crafted to provoke many detailed validation errors.
+A {class}`cattrs.ConversionBudget` caps the resources a single {meth}`BaseConverter.structure` or {meth}`BaseConverter.unstructure` call may use.
+
+Four independent limits are supported; leaving a limit as `None` makes it unlimited:
+
+- `node_limit` counts hook visits, including hooks for nested collections, generic classes and user-registered hooks.
+- `depth_limit` counts the current nesting depth of those hook visits.
+- `container_limit` counts the elements of target containers, both when structuring and unstructuring. The charge is applied *before* the target container is allocated, so an over-limit container is never built. Sized iterables are charged their length; an unsized iterable is charged as one element, since its length cannot be known without consuming it.
+- `error_limit` counts ordinary errors collected by detailed validation. When it is exceeded the conversion stops instead of aggregating yet another error.
+
+The same budget instance is shared by every hook taking part in one conversion.
+Crossing a collection or hook boundary never resets the counters.
+Budgets are single-use: install a fresh one (or clear it with `None`) before the next conversion.
+
+```python
+from cattrs import (
+    ConversionBudget,
+    ConversionBudgetExceeded,
+    Converter,
+)
+
+converter = Converter()
+budget = ConversionBudget.of(node_limit=1000, depth_limit=20, container_limit=10_000, error_limit=50)
+converter.configure_budget(budget)
+
+try:
+    converter.structure(untrusted_data, Model)
+except Exception as exc:
+    # A ConversionBudgetExceeded is terminal: detailed validation never groups
+    # it with ordinary field errors and never continues past it.
+    if isinstance(exc, ConversionBudgetExceeded):
+        print(exc.resource, exc.limit, exc.value)
+```
+
+`conversion_budget` is also available as a context manager, and a budget may be passed to the converter constructor.
+Copied converters do not inherit the source converter's budget.
+
+After a conversion, the budget's counters (`nodes`, `max_depth`, `container_elements`, `errors`) describe the work performed.
+Once a limit terminates a conversion the budget is marked `exhausted`.
+Clearing or replacing the budget leaves no counters behind on the converter, so the same converter can be reused immediately.
+
+### Measurement Boundaries
+
+_cattrs_ meters work that flows through its own dispatch and hook machinery.
+Work performed *inside* a user hook is only visible to the budget when the hook calls back into the converter.
+
+For example, a user hook that builds a list directly and never calls the converter is a single opaque unit of work: its internal loop is not charged per element, and its output container is not charged to `container_limit`.
+If that same hook calls `converter.structure` for each element, every call is metered and the shared budget is enforced.
+
+The budget cannot interrupt arbitrary Python code inside a user hook, so a hook that loops on its own input should apply its own limits if it needs this protection.

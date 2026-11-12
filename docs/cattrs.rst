@@ -19,6 +19,14 @@ Subpackages
 Submodules
 ----------
 
+cattrs.budget module
+--------------------
+
+.. automodule:: cattrs.budget
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 cattrs.cols module
 ------------------
 

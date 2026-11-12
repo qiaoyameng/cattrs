@@ -1,10 +1,12 @@
 from typing import Final
 
+from .budget import ConversionBudget
 from .converters import BaseConverter, Converter, GenConverter, UnstructureStrategy
 from .errors import (
     AttributeValidationNote,
     BaseValidationError,
     ClassValidationError,
+    ConversionBudgetExceeded,
     ForbiddenExtraKeysError,
     IterableValidationError,
     IterableValidationNote,
@@ -19,6 +21,8 @@ __all__ = [
     "BaseConverter",
     "BaseValidationError",
     "ClassValidationError",
+    "ConversionBudget",
+    "ConversionBudgetExceeded",
     "Converter",
     "ForbiddenExtraKeysError",
     "GenConverter",

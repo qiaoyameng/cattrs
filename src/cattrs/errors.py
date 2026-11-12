@@ -10,6 +10,55 @@ class CattrsError(Exception):
     """Base ``cattrs`` exception."""
 
 
+class ConversionBudgetExceeded(CattrsError):
+    """Raised when a conversion exhausts its :class:`ConversionBudget`.
+
+    This is a terminal exception: detailed validation deliberately lets it
+    propagate instead of collecting it as an ordinary field error. It is never
+    grouped inside a :class:`BaseValidationError` by ``cattrs`` itself.
+
+    :ivar resource: The exhausted resource: ``"nodes"``, ``"depth"``,
+    ``"containers"`` or ``"errors"``.
+    :ivar limit: The configured limit for the exhausted resource.
+    :ivar value: The counter value that exceeded the limit.
+    :ivar budget: The budget that was exhausted.
+
+    .. versionadded:: NEXT
+    """
+
+    def __init__(
+        self, resource: str, limit: int, value: int, budget: Any = None
+    ) -> None:
+        super().__init__(resource, limit, value, budget)
+        self.resource = resource
+        self.limit = limit
+        self.value = value
+        self.budget = budget
+
+    def __str__(self) -> str:
+        return (
+            f"Conversion budget exceeded: {self.resource} limit is {self.limit}, "
+            f"reached {self.value}"
+        )
+
+    def __reduce__(self):
+        return (self.__class__, (self.resource, self.limit, self.value))
+
+
+def count_budget_exceeded(error: BaseException) -> int:
+    """Count :class:`ConversionBudgetExceeded` instances in an exception tree."""
+    if isinstance(error, ConversionBudgetExceeded):
+        return 1
+    if isinstance(error, ExceptionGroup):
+        return sum(count_budget_exceeded(e) for e in error.exceptions)
+    return 0
+
+
+def contains_budget_exceeded(error: BaseException) -> bool:
+    """Is a budget termination (possibly within an exception group) present?"""
+    return count_budget_exceeded(error) > 0
+
+
 class StructureHandlerNotFoundError(CattrsError):
     """
     Error raised when structuring cannot find a handler for converting inputs into

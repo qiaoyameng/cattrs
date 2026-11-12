@@ -21,11 +21,12 @@ from .._generics import deep_copy_with
 from ..errors import (
     AttributeValidationNote,
     ClassValidationError,
+    ConversionBudgetExceeded,
     ForbiddenExtraKeysError,
     StructureHandlerNotFoundError,
 )
 from ..fns import identity
-from . import AttributeOverride
+from . import AttributeOverride, _struct_call
 from ._consts import already_generating, neutral
 from ._generics import generate_mapping
 from ._lc import generate_unique_filename
@@ -81,7 +82,7 @@ def make_dict_unstructure_fn(
     fn_name = "unstructure_typeddict_" + cl_name
     globs = {}
     lines = []
-    internal_arg_parts = {}
+    internal_arg_parts = {"__c_converter": converter}
 
     # We keep track of what we're generating to help with recursive
     # class graphs.
@@ -192,7 +193,13 @@ def make_dict_unstructure_fn(
                 unstruct_handler_name = f"__c_unstr_{ix}"
                 globs[unstruct_handler_name] = handler
                 internal_arg_parts[unstruct_handler_name] = handler
-                invoke = f"{unstruct_handler_name}(instance[{attr_name!r}])"
+                if converter._budget is None:
+                    invoke = f"{unstruct_handler_name}(instance[{attr_name!r}])"
+                else:
+                    invoke = (
+                        "__c_converter._budget_unstructure("
+                        f"{unstruct_handler_name}, instance[{attr_name!r}])"
+                    )
             elif override.rename is None:
                 # We're not doing anything to this attribute, so
                 # it'll already be present in the input dict.
@@ -213,8 +220,13 @@ def make_dict_unstructure_fn(
         for k, v in internal_arg_parts.items():
             globs[k] = v
 
-        total_lines = [
-            f"def {fn_name}(instance{internal_arg_line}):",
+        total_lines = [f"def {fn_name}(instance{internal_arg_line}):"]
+        if converter._budget is not None:
+            total_lines.append(
+                "  __c_converter._budget and __c_converter._budget.add_container_elements("
+                "len(instance))"
+            )
+        total_lines += [
             "  res = instance.copy()",
             *lines,
             "  return res",
@@ -297,8 +309,8 @@ def make_dict_structure_fn(
         name = re.sub(r"\|", "u", name)
         fn_name += f"_{name}"
 
-    internal_arg_parts = {"__cl": cl}
-    globs = {}
+    internal_arg_parts = {"__cl": cl, "__c_converter": converter}
+    globs = {"ConversionBudgetExceeded": ConversionBudgetExceeded}
     lines = []
     post_lines = []
 
@@ -326,6 +338,11 @@ def make_dict_structure_fn(
             f"    raise __c_cve('While structuring ' + {cl.__name__!r}, [{te}], __cl)"
         )
 
+    if converter._budget is not None:
+        lines.append(
+            "  __c_converter._budget and __c_converter._budget.add_container_elements("
+            "len(o))"
+        )
     lines.append("  res = o.copy()")
 
     if _cattrs_detailed_validation:
@@ -383,12 +400,17 @@ def make_dict_structure_fn(
 
             if handler == converter._structure_call:
                 internal_arg_parts[struct_handler_name] = t
-                lines.append(f"{i}res[{an!r}] = {struct_handler_name}(o[{kn!r}])")
+                call = _struct_call(converter, struct_handler_name, f"o[{kn!r}]")
             else:
-                lines.append(f"{i}res[{an!r}] = {struct_handler_name}(o[{kn!r}], {tn})")
+                call = _struct_call(
+                    converter, struct_handler_name, f"o[{kn!r}]", tn
+                )
+            lines.append(f"{i}res[{an!r}] = {call}")
             if override.rename is not None:
                 lines.append(f"{i}del res[{kn!r}]")
             i = i[:-2]
+            if converter._budget is not None:
+                lines.append(f"{i}except ConversionBudgetExceeded: raise")
             lines.append(f"{i}except Exception as e:")
             i = f"{i}  "
             note = f"Structuring typeddict {cl.__qualname__} @ attribute {an}"
@@ -396,12 +418,22 @@ def make_dict_structure_fn(
                 f"{i}e.__notes__ = [*getattr(e, '__notes__', []), "
                 f"__c_avn({note!r}, {an!r}, {tn})]"
             )
+            if converter._budget is not None:
+                lines.append(
+                    f"{i}__c_converter._budget and __c_converter._budget.add_error()"
+                )
             lines.append(f"{i}errors.append(e)")
 
         if _cattrs_forbid_extra_keys:
             post_lines += [
                 "  unknown_fields = o.keys() - __c_a",
                 "  if unknown_fields:",
+            ]
+            if converter._budget is not None:
+                post_lines.append(
+                    "    __c_converter._budget and __c_converter._budget.add_error()"
+                )
+            post_lines += [
                 "    errors.append(__c_feke('', __cl, unknown_fields))",
             ]
 
@@ -453,13 +485,14 @@ def make_dict_structure_fn(
             internal_arg_parts[struct_handler_name] = handler
             if handler == converter._structure_call:
                 internal_arg_parts[struct_handler_name] = t
-                invocation_line = f"  res[{an!r}] = {struct_handler_name}(o[{kn!r}])"
+                call = _struct_call(converter, struct_handler_name, f"o[{kn!r}]")
             else:
                 tn = f"__c_type_{ix}"
                 internal_arg_parts[tn] = t
-                invocation_line = (
-                    f"  res[{an!r}] = {struct_handler_name}(o[{kn!r}], {tn})"
+                call = _struct_call(
+                    converter, struct_handler_name, f"o[{kn!r}]", tn
                 )
+            invocation_line = f"  res[{an!r}] = {call}"
 
             lines.append(invocation_line)
             if override.rename is not None:
@@ -503,15 +536,14 @@ def make_dict_structure_fn(
                 post_lines.append(f"  if {kn!r} in o:")
                 if handler == converter._structure_call:
                     internal_arg_parts[struct_handler_name] = t
-                    post_lines.append(
-                        f"    res[{ian!r}] = {struct_handler_name}(o[{kn!r}])"
-                    )
+                    call = _struct_call(converter, struct_handler_name, f"o[{kn!r}]")
                 else:
                     tn = f"__c_type_{ix}"
                     internal_arg_parts[tn] = t
-                    post_lines.append(
-                        f"    res[{ian!r}] = {struct_handler_name}(o[{kn!r}], {tn})"
+                    call = _struct_call(
+                        converter, struct_handler_name, f"o[{kn!r}]", tn
                     )
+                post_lines.append(f"    res[{ian!r}] = {call}")
                 if override.rename is not None:
                     lines.append(f"  res.pop({override.rename!r}, None)")
 

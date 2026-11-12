@@ -24,7 +24,11 @@ from ._compat import (
 )
 from ._compat import is_mutable_set as is_set
 from .dispatch import StructureHook, UnstructureHook
-from .errors import IterableValidationError, IterableValidationNote
+from .errors import (
+    ConversionBudgetExceeded,
+    IterableValidationError,
+    IterableValidationNote,
+)
 from .fns import identity
 from .gen import (
     AttributeOverride,
@@ -103,10 +107,19 @@ def list_structure_factory(type: type, converter: BaseConverter) -> StructureHoo
     Converts any given iterable into a list.
     """
 
-    if is_bare(type) or type.__args__[0] in ANIES:
+    budgeted = converter._budget is not None
 
-        def structure_list(obj: Iterable[T], _: type = type) -> list[T]:
-            return list(obj)
+    if is_bare(type) or type.__args__[0] in ANIES:
+        if not budgeted:
+
+            def structure_list(obj: Iterable[T], _: type = type) -> list[T]:
+                return list(obj)
+
+        else:
+
+            def structure_list(obj: Iterable[T], _: type = type) -> list[T]:
+                converter._budget_check_container(obj)
+                return list(obj)
 
         return structure_list
 
@@ -119,37 +132,78 @@ def list_structure_factory(type: type, converter: BaseConverter) -> StructureHoo
         handler = converter.structure
 
     if converter.detailed_validation:
+        if not budgeted:
 
-        def structure_list(
-            obj: Iterable[T], _: type = type, _handler=handler, _elem_type=elem_type
-        ) -> list[T]:
-            errors = []
-            res = []
-            ix = 0  # Avoid `enumerate` for performance.
-            for e in obj:
-                try:
-                    res.append(handler(e, _elem_type))
-                except Exception as e:
-                    msg = IterableValidationNote(
-                        f"Structuring {type} @ index {ix}", ix, elem_type
+            def structure_list(
+                obj: Iterable[T], _: type = type, _handler=handler, _elem_type=elem_type
+            ) -> list[T]:
+                errors = []
+                res = []
+                ix = 0  # Avoid `enumerate` for performance.
+                for e in obj:
+                    try:
+                        res.append(_handler(e, _elem_type))
+                    except Exception as e:
+                        msg = IterableValidationNote(
+                            f"Structuring {type} @ index {ix}", ix, elem_type
+                        )
+                        e.__notes__ = [*getattr(e, "__notes__", []), msg]
+                        errors.append(e)
+                    finally:
+                        ix += 1
+                if errors:
+                    raise IterableValidationError(
+                        f"While structuring {type!r}", errors, type
                     )
-                    e.__notes__ = [*getattr(e, "__notes__", []), msg]
-                    errors.append(e)
-                finally:
-                    ix += 1
-            if errors:
-                raise IterableValidationError(
-                    f"While structuring {type!r}", errors, type
-                )
 
-            return res
+                return res
+
+        else:
+
+            def structure_list(
+                obj: Iterable[T], _: type = type, _handler=handler, _elem_type=elem_type
+            ) -> list[T]:
+                converter._budget_check_container(obj)
+                errors = []
+                res = []
+                ix = 0  # Avoid `enumerate` for performance.
+                for e in obj:
+                    try:
+                        res.append(converter._run_budgeted(_handler, e, _elem_type))
+                    except ConversionBudgetExceeded:
+                        raise
+                    except Exception as e:
+                        msg = IterableValidationNote(
+                            f"Structuring {type} @ index {ix}", ix, elem_type
+                        )
+                        e.__notes__ = [*getattr(e, "__notes__", []), msg]
+                        converter._collect_budget_error(errors, e)
+                    finally:
+                        ix += 1
+                if errors:
+                    raise IterableValidationError(
+                        f"While structuring {type!r}", errors, type
+                    )
+
+                return res
 
     else:
+        if not budgeted:
 
-        def structure_list(
-            obj: Iterable[T], _: type = type, _handler=handler, _elem_type=elem_type
-        ) -> list[T]:
-            return [_handler(e, _elem_type) for e in obj]
+            def structure_list(
+                obj: Iterable[T], _: type = type, _handler=handler, _elem_type=elem_type
+            ) -> list[T]:
+                return [_handler(e, _elem_type) for e in obj]
+
+        else:
+
+            def structure_list(
+                obj: Iterable[T], _: type = type, _handler=handler, _elem_type=elem_type
+            ) -> list[T]:
+                converter._budget_check_container(obj)
+                return [
+                    converter._run_budgeted(_handler, e, _elem_type) for e in obj
+                ]
 
     return structure_list
 
@@ -163,9 +217,16 @@ def homogenous_tuple_structure_factory(
     """
 
     if is_bare(type) or type.__args__[0] in ANIES:
+        if converter._budget is None:
 
-        def structure_tuple(obj: Iterable[T], _: type = type) -> tuple[T, ...]:
-            return tuple(obj)
+            def structure_tuple(obj: Iterable[T], _: type = type) -> tuple[T, ...]:
+                return tuple(obj)
+
+        else:
+
+            def structure_tuple(obj: Iterable[T], _: type = type) -> tuple[T, ...]:
+                converter._budget_check_container(obj)
+                return tuple(obj)
 
         return structure_tuple
 
@@ -184,12 +245,22 @@ def homogenous_tuple_structure_factory(
         def structure_tuple(obj: Iterable[T], _: type = type) -> tuple[T, ...]:
             return tuple(list_structure(obj, _))
 
-    else:
+    elif converter._budget is None:
 
         def structure_tuple(
             obj: Iterable[T], _: type = type, _handler=handler, _elem_type=elem_type
         ) -> tuple[T, ...]:
             return tuple([_handler(e, _elem_type) for e in obj])
+
+    else:
+
+        def structure_tuple(
+            obj: Iterable[T], _: type = type, _handler=handler, _elem_type=elem_type
+        ) -> tuple[T, ...]:
+            converter._budget_check_container(obj)
+            return tuple(
+                [converter._run_budgeted(_handler, e, _elem_type) for e in obj]
+            )
 
     return structure_tuple
 

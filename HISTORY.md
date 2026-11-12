@@ -13,6 +13,9 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
 
 ## NEXT
 
+- Add optional per-conversion budgets via {class}`cattrs.ConversionBudget`, covering visited hook nodes, nesting depth, generated output container elements and accumulated detailed validation errors.
+  Budgets are shared across nested collections, generics and user hook boundaries, are charged before target containers are allocated, and terminate with {class}`cattrs.ConversionBudgetExceeded`, which detailed validation never aggregates as an ordinary field error.
+  With no budget installed the previous fast path is preserved.
 - Fix the msgspec converter passing typed deques directly to the encoder, which cannot serialize them. Deques are now unstructured into lists, including when nested in attrs classes or dataclasses.
   ([#818](https://github.com/python-attrs/cattrs/issues/818) [#819](https://github.com/python-attrs/cattrs/pull/819))
 

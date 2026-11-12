@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, deque
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 from collections.abc import Mapping as AbcMapping
 from collections.abc import MutableMapping as AbcMutableMapping
 from dataclasses import Field
@@ -22,6 +23,7 @@ except ImportError:
 
 from ._compat import (
     ANIES,
+    ExceptionGroup,
     FrozenSetSubscriptable,
     Mapping,
     MutableMapping,
@@ -60,6 +62,7 @@ from ._compat import (
     sentinel,
     signature,
 )
+from .budget import ConversionBudget
 from .cols import (
     defaultdict_structure_factory,
     homogenous_tuple_structure_factory,
@@ -87,9 +90,11 @@ from .dispatch import (
 from .enums import enum_structure_factory, enum_unstructure_factory
 from .errors import (
     CattrsError,
+    ConversionBudgetExceeded,
     IterableValidationError,
     IterableValidationNote,
     StructureHandlerNotFoundError,
+    count_budget_exceeded,
 )
 from .fns import Predicate, identity, raise_error
 from .gen import (
@@ -189,6 +194,7 @@ class BaseConverter:
     """Converts between structured and unstructured data."""
 
     __slots__ = (
+        "_budget",
         "_dict_factory",
         "_prefer_attrib_converters",
         "_struct_copy_skip",
@@ -211,6 +217,7 @@ class BaseConverter:
         structure_fallback_factory: HookFactory[StructureHook] = lambda t: raise_error(
             None, t
         ),
+        budget: ConversionBudget | None = None,
     ) -> None:
         """
         :param detailed_validation: Whether to use a slightly slower mode for detailed
@@ -219,16 +226,21 @@ class BaseConverter:
             registered unstructuring hooks match.
         :param structure_fallback_factory: A hook factory to be called when no
             registered structuring hooks match.
+        :param budget: An optional :class:`~cattrs.ConversionBudget` limiting the
+            work a single conversion may do. Budgets are single-use; see
+            :meth:`configure_budget`.
 
         ..  versionadded:: 23.2.0 *unstructure_fallback_factory*
         ..  versionadded:: 23.2.0 *structure_fallback_factory*
         ..  versionchanged:: 24.2.0
             The default `structure_fallback_factory` now raises errors for missing handlers
             more eagerly, surfacing problems earlier.
+        ..  versionadded:: NEXT *budget*
         """
         unstruct_strat = UnstructureStrategy(unstruct_strat)
         self._prefer_attrib_converters = prefer_attrib_converters
 
+        self._budget = budget
         self.detailed_validation = detailed_validation
         self._union_struct_registry: dict[Any, Callable[[Any, type[T]], T]] = {}
 
@@ -356,10 +368,133 @@ class BaseConverter:
         self._unstruct_copy_skip = self._unstructure_func.get_num_fns()
         self._struct_copy_skip = self._structure_func.get_num_fns()
 
+    @property
+    def budget(self) -> ConversionBudget | None:
+        """The currently installed conversion budget, if any.
+
+        .. versionadded:: NEXT
+        """
+        return self._budget
+
+    def configure_budget(self, budget: ConversionBudget | None) -> None:
+        """Install (or clear, with ``None``) the conversion budget.
+
+        Budgets are single-use: once a budget is exhausted, install a fresh
+        one before the next conversion. A converter with no budget installed
+        takes the unmetered fast path.
+
+        Generated hooks are specialized for the budget that is active when
+        they are produced (the unmetered form is a series of direct hook
+        calls). Cached hooks are therefore dropped here so a newly installed
+        or removed budget is respected by pre-generated hooks too.
+
+        .. versionadded:: NEXT
+        """
+        self._budget = budget
+        self._structure_func.clear_cache()
+        self._unstructure_func.clear_cache()
+
+    @contextmanager
+    def conversion_budget(self, budget: ConversionBudget):
+        """Install ``budget`` for the duration of the block, then remove it.
+
+        .. versionadded:: NEXT
+        """
+        self.configure_budget(budget)
+        try:
+            yield budget
+        finally:
+            self.configure_budget(None)
+
+    def _run_budgeted(self, hook: Callable, *args: Any) -> Any:
+        """Run a cached structure hook under the installed budget, if any.
+
+        The hook is invoked directly but wrapped with one balanced node
+        visit, so hooks produced before a budget was installed are still
+        metered without an extra re-entrant node.
+        """
+        budget = self._budget
+        if budget is None:
+            return hook(*args)
+        func = getattr(hook, "__func__", None)
+        if (
+            func is not None
+            and getattr(hook, "__self__", None) is self
+            and func.__name__ == "structure"
+        ):
+            # Late-bound recursive hooks already meter themselves.
+            return hook(*args)
+        entered = False
+        try:
+            budget.enter_node()
+            entered = True
+            return hook(*args)
+        finally:
+            if entered:
+                budget.exit_node()
+
+    def _budget_structure(self, hook: Callable, obj: Any, cl: Any) -> Any:
+        """Invoke a generated structure hook, honoring a live budget.
+
+        Re-enters through the public entry point so the live budget sees
+        hooks generated before it was installed. No extra node is counted:
+        the entry point performs the single balanced visit.
+        """
+        if self._budget is None:
+            return hook(obj, cl)
+        return self.structure(obj, cl)
+
+    def _budget_structure_simple(self, cl: Callable, obj: Any) -> Any:
+        """Invoke a one-argument generated structure hook under a live budget."""
+        if self._budget is None:
+            return cl(obj)
+        return self.structure(obj, cl)
+
+    def _budget_unstructure(self, hook: Callable, obj: Any) -> Any:
+        """Invoke a generated unstructure hook, honoring a live budget."""
+        if self._budget is None:
+            return hook(obj)
+        return self.unstructure(obj)
+
+    def _budget_check_container(self, obj: Any) -> None:
+        """Charge container elements before a passthrough container is built."""
+        budget = self._budget
+        if budget is not None:
+            budget.add_container_elements(
+                len(obj) if hasattr(obj, "__len__") else 1
+            )
+
+    def _collect_budget_error(self, errors: list[Exception], exc: Exception) -> None:
+        """Collect a detailed-validation error, honoring the error budget."""
+        if self._budget is not None:
+            self._budget.add_error()
+        errors.append(exc)
+
     def unstructure(self, obj: Any, unstructure_as: Any = None) -> Any:
-        return self._unstructure_func.dispatch(
+        hook = self._unstructure_func.dispatch(
             obj.__class__ if unstructure_as is None else unstructure_as
-        )(obj)
+        )
+        budget = self._budget
+        if budget is None:
+            return hook(obj)
+        # Entry points account for nodes themselves so late-bound hooks (which
+        # call back into ``unstructure`` rather than a cached hook) are metered
+        # too; hook boundaries never reset the budget.
+        entered = False
+        try:
+            budget.enter_node()
+            entered = True
+            try:
+                return hook(obj)
+            except Exception as e:
+                if count_budget_exceeded(e):
+                    raise
+                if isinstance(e, ExceptionGroup):
+                    budget.add_error()
+                raise
+        finally:
+            if entered:
+                budget.exit_node()
 
     @property
     def unstruct_strat(self) -> UnstructureStrategy:
@@ -635,7 +770,28 @@ class BaseConverter:
             The target type is now annotated with ``TypeForm`` to support
             stronger type hints.
         """
-        return self._structure_func.dispatch(cl)(obj, cl)
+        hook = self._structure_func.dispatch(cl)
+        budget = self._budget
+        if budget is None:
+            return hook(obj, cl)
+        # Entry points account for nodes themselves so late-bound hooks (which
+        # call back into ``structure`` rather than a cached hook) are metered
+        # too; hook boundaries never reset the budget.
+        entered = False
+        try:
+            budget.enter_node()
+            entered = True
+            try:
+                return hook(obj, cl)
+            except Exception as e:
+                if count_budget_exceeded(e):
+                    raise
+                if isinstance(e, ExceptionGroup):
+                    budget.add_error()
+                raise
+        finally:
+            if entered:
+                budget.exit_node()
 
     def get_structure_hook(
         self, type: TypeForm[T], cache_result: bool = True
@@ -671,7 +827,7 @@ class BaseConverter:
         for a in attrs:
             name = a.name
             v = getattr(obj, name)
-            rv[name] = dispatch(a.type or v.__class__)(v)
+            rv[name] = self._run_budgeted(dispatch(a.type or v.__class__), v)
         return rv
 
     def unstructure_attrs_astuple(self, obj: Any) -> tuple[Any, ...]:
@@ -682,14 +838,19 @@ class BaseConverter:
         for a in attrs:
             name = a.name
             v = getattr(obj, name)
-            res.append(dispatch(a.type or v.__class__)(v))
+            res.append(self._run_budgeted(dispatch(a.type or v.__class__), v))
         return tuple(res)
 
     def _unstructure_seq(self, seq: Sequence[T]) -> Sequence[T]:
         """Convert a sequence to primitive equivalents."""
         # We can reuse the sequence class, so tuples stay tuples.
         dispatch = self._unstructure_func.dispatch
-        return seq.__class__(dispatch(e.__class__)(e) for e in seq)
+        if self._budget is None:
+            return seq.__class__(dispatch(e.__class__)(e) for e in seq)
+        self._budget_check_container(seq)
+        return seq.__class__(
+            self._run_budgeted(dispatch(e.__class__), e) for e in seq
+        )
 
     def _unstructure_mapping(self, mapping: Mapping[T, V]) -> Mapping[T, V]:
         """Convert a mapping of attr classes to primitive equivalents."""
@@ -697,8 +858,17 @@ class BaseConverter:
         # We can reuse the mapping class, so dicts stay dicts and OrderedDicts
         # stay OrderedDicts.
         dispatch = self._unstructure_func.dispatch
+        if self._budget is None:
+            return mapping.__class__(
+                (dispatch(k.__class__)(k), dispatch(v.__class__)(v))
+                for k, v in mapping.items()
+            )
+        self._budget_check_container(mapping)
         return mapping.__class__(
-            (dispatch(k.__class__)(k), dispatch(v.__class__)(v))
+            (
+                self._run_budgeted(dispatch(k.__class__), k),
+                self._run_budgeted(dispatch(v.__class__), v),
+            )
             for k, v in mapping.items()
         )
 
@@ -711,7 +881,9 @@ class BaseConverter:
 
         By default, just unstructures the instance.
         """
-        return self._unstructure_func.dispatch(obj.__class__)(obj)
+        return self._run_budgeted(
+            self._unstructure_func.dispatch(obj.__class__), obj
+        )
 
     # Python primitives to classes.
 
@@ -774,7 +946,7 @@ class BaseConverter:
 
     def _structure_newtype(self, val: UnstructuredValue, type) -> StructuredValue:
         base = get_newtype_base(type)
-        return self.get_structure_hook(base)(val, base)
+        return self._run_budgeted(self.get_structure_hook(base), val, base)
 
     def _structure_final_factory(self, type):
         base = get_final_base(type)
@@ -808,7 +980,9 @@ class BaseConverter:
             return value
 
         try:
-            return self._structure_func.dispatch(type_)(value, type_)
+            return self._run_budgeted(
+                self._structure_func.dispatch(type_), value, type_
+            )
         except StructureHandlerNotFoundError:
             if attrib_converter:
                 # Return the original value and fallback to using an attrib converter.
@@ -834,23 +1008,27 @@ class BaseConverter:
     def _structure_deque(self, obj: Iterable[T], cl: Any) -> deque[T]:
         """Convert an iterable to a potentially generic deque."""
         if is_bare(cl) or cl.__args__[0] in ANIES:
+            self._budget_check_container(obj)
             res = deque(obj)
         else:
             elem_type = cl.__args__[0]
             handler = self._structure_func.dispatch(elem_type)
+            self._budget_check_container(obj)
             if self.detailed_validation:
                 errors = []
                 res = deque()
                 ix = 0  # Avoid `enumerate` for performance.
                 for e in obj:
                     try:
-                        res.append(handler(e, elem_type))
+                        res.append(self._run_budgeted(handler, e, elem_type))
+                    except ConversionBudgetExceeded:
+                        raise
                     except Exception as e:
                         msg = IterableValidationNote(
                             f"Structuring {cl} @ index {ix}", ix, elem_type
                         )
                         e.__notes__ = [*getattr(e, "__notes__", []), msg]
-                        errors.append(e)
+                        self._collect_budget_error(errors, e)
                     finally:
                         ix += 1
                 if errors:
@@ -858,7 +1036,9 @@ class BaseConverter:
                         f"While structuring {cl!r}", errors, cl
                     )
             else:
-                res = deque(handler(e, elem_type) for e in obj)
+                res = deque(
+                    self._run_budgeted(handler, e, elem_type) for e in obj
+                )
         return res
 
     def _structure_set(
@@ -866,16 +1046,20 @@ class BaseConverter:
     ) -> Set[T]:
         """Convert an iterable into a potentially generic set."""
         if is_bare(cl) or cl.__args__[0] in ANIES:
+            self._budget_check_container(obj)
             return structure_to(obj)
         elem_type = cl.__args__[0]
         handler = self._structure_func.dispatch(elem_type)
+        self._budget_check_container(obj)
         if self.detailed_validation:
             errors = []
             res = set()
             ix = 0
             for e in obj:
                 try:
-                    res.add(handler(e, elem_type))
+                    res.add(self._run_budgeted(handler, e, elem_type))
+                except ConversionBudgetExceeded:
+                    raise
                 except Exception as exc:
                     msg = IterableValidationNote(
                         f"Structuring {structure_to.__name__} @ element {e!r}",
@@ -883,15 +1067,17 @@ class BaseConverter:
                         elem_type,
                     )
                     exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
-                    errors.append(exc)
+                    self._collect_budget_error(errors, exc)
                 finally:
                     ix += 1
             if errors:
                 raise IterableValidationError(f"While structuring {cl!r}", errors, cl)
             return res if structure_to is set else structure_to(res)
         if structure_to is set:
-            return {handler(e, elem_type) for e in obj}
-        return structure_to([handler(e, elem_type) for e in obj])
+            return {self._run_budgeted(handler, e, elem_type) for e in obj}
+        return structure_to(
+            [self._run_budgeted(handler, e, elem_type) for e in obj]
+        )
 
     def _structure_frozenset(
         self, obj: Iterable[T], cl: Any
@@ -902,6 +1088,7 @@ class BaseConverter:
     def _structure_dict(self, obj: Mapping[T, V], cl: Any) -> dict[T, V]:
         """Convert a mapping into a potentially generic dict."""
         if is_bare(cl) or cl.__args__ == (Any, Any):
+            self._budget_check_container(obj)
             return dict(obj)
         key_type, val_type = cl.__args__
 
@@ -910,41 +1097,56 @@ class BaseConverter:
             val_handler = self._structure_func.dispatch(val_type)
             errors = []
             res = {}
+            self._budget_check_container(obj)
 
             for k, v in obj.items():
                 try:
-                    value = val_handler(v, val_type)
+                    value = self._run_budgeted(val_handler, v, val_type)
+                except ConversionBudgetExceeded:
+                    raise
                 except Exception as exc:
                     msg = IterableValidationNote(
                         f"Structuring mapping value @ key {k!r}", k, val_type
                     )
                     exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
-                    errors.append(exc)
+                    self._collect_budget_error(errors, exc)
                     continue
 
                 try:
-                    key = key_handler(k, key_type)
+                    key = self._run_budgeted(key_handler, k, key_type)
                     res[key] = value
+                except ConversionBudgetExceeded:
+                    raise
                 except Exception as exc:
                     msg = IterableValidationNote(
                         f"Structuring mapping key @ key {k!r}", k, key_type
                     )
                     exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
-                    errors.append(exc)
+                    self._collect_budget_error(errors, exc)
 
             if errors:
                 raise IterableValidationError(f"While structuring {cl!r}", errors, cl)
             return res
 
+        self._budget_check_container(obj)
         if key_type in ANIES:
             val_conv = self._structure_func.dispatch(val_type)
-            return {k: val_conv(v, val_type) for k, v in obj.items()}
+            return {
+                k: self._run_budgeted(val_conv, v, val_type) for k, v in obj.items()
+            }
         if val_type in ANIES:
             key_conv = self._structure_func.dispatch(key_type)
-            return {key_conv(k, key_type): v for k, v in obj.items()}
+            return {
+                self._run_budgeted(key_conv, k, key_type): v for k, v in obj.items()
+            }
         key_conv = self._structure_func.dispatch(key_type)
         val_conv = self._structure_func.dispatch(val_type)
-        return {key_conv(k, key_type): val_conv(v, val_type) for k, v in obj.items()}
+        return {
+            self._run_budgeted(key_conv, k, key_type): self._run_budgeted(
+                val_conv, v, val_type
+            )
+            for k, v in obj.items()
+        }
 
     def _structure_optional(self, obj, union):
         if obj is None:
@@ -954,7 +1156,7 @@ class BaseConverter:
         union_params = union.__args__
         other = union_params[0] if union_params[1] is NoneType else union_params[1]
         # We can't actually have a Union of a Union, so this is safe.
-        return self._structure_func.dispatch(other)(obj, other)
+        return self._run_budgeted(self._structure_func.dispatch(other), obj, other)
 
     def gen_structure_hetero_tuple(self, cl: Any) -> HeteroTupleStructureFn:
         """Generate a heterogeneous tuple structure function."""
@@ -968,24 +1170,28 @@ class BaseConverter:
         has_ellipsis = tup_params and tup_params[-1] is Ellipsis
         if tup_params is None or (has_ellipsis and tup_params[0] in ANIES):
             # Just a Tuple. (No generic information.)
+            self._budget_check_container(obj)
             return tuple(obj)
         if has_ellipsis:
             # We're dealing with a homogeneous tuple, tuple[int, ...]
             tup_type = tup_params[0]
             conv = self._structure_func.dispatch(tup_type)
+            self._budget_check_container(obj)
             if self.detailed_validation:
                 errors = []
                 res = []
                 ix = 0
                 for e in obj:
                     try:
-                        res.append(conv(e, tup_type))
+                        res.append(self._run_budgeted(conv, e, tup_type))
+                    except ConversionBudgetExceeded:
+                        raise
                     except Exception as exc:
                         msg = IterableValidationNote(
                             f"Structuring {tup} @ index {ix}", ix, tup_type
                         )
                         exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
-                        errors.append(exc)
+                        self._collect_budget_error(errors, exc)
                     finally:
                         ix += 1
                 if errors:
@@ -993,29 +1199,32 @@ class BaseConverter:
                         f"While structuring {tup!r}", errors, tup
                     )
                 return tuple(res)
-            return tuple(conv(e, tup_type) for e in obj)
+            return tuple(self._run_budgeted(conv, e, tup_type) for e in obj)
 
         # We're dealing with a heterogeneous tuple.
         exp_len = len(tup_params)
+        self._budget_check_container(obj)
         if self.detailed_validation:
             errors = []
             res = []
             for ix, (t, e) in enumerate(zip(tup_params, obj)):
                 try:
                     conv = self._structure_func.dispatch(t)
-                    res.append(conv(e, t))
+                    res.append(self._run_budgeted(conv, e, t))
+                except ConversionBudgetExceeded:
+                    raise
                 except Exception as exc:
                     msg = IterableValidationNote(
                         f"Structuring {tup} @ index {ix}", ix, t
                     )
                     exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
-                    errors.append(exc)
+                    self._collect_budget_error(errors, exc)
             if len(obj) != exp_len:
                 problem = "Not enough" if len(res) < exp_len else "Too many"
                 exc = ValueError(f"{problem} values in {obj!r} to structure as {tup!r}")
                 msg = f"Structuring {tup}"
                 exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
-                errors.append(exc)
+                self._collect_budget_error(errors, exc)
             if errors:
                 raise IterableValidationError(f"While structuring {tup!r}", errors, tup)
             return tuple(res)
@@ -1024,7 +1233,10 @@ class BaseConverter:
             problem = "Not enough" if len(obj) < len(tup_params) else "Too many"
             raise ValueError(f"{problem} values in {obj!r} to structure as {tup!r}")
         return tuple(
-            [self._structure_func.dispatch(t)(e, t) for t, e in zip(tup_params, obj)]
+            [
+                self._run_budgeted(self._structure_func.dispatch(t), e, t)
+                for t, e in zip(tup_params, obj)
+            ]
         )
 
     def _get_dis_func(
@@ -1063,11 +1275,14 @@ class BaseConverter:
         unstruct_strat: UnstructureStrategy | None = None,
         prefer_attrib_converters: bool | None = None,
         detailed_validation: bool | None = None,
+        budget: ConversionBudget | None = None,
     ) -> Self:
         """Create a copy of the converter, keeping all existing custom hooks.
 
         :param detailed_validation: Whether to use a slightly slower mode for detailed
             validation errors.
+        :param budget: An optional budget to install on the copy. Budgets are
+            single-use, so the source converter's budget is not copied by default.
         """
         res = self.__class__(
             dict_factory if dict_factory is not None else self._dict_factory,
@@ -1090,6 +1305,7 @@ class BaseConverter:
                 if detailed_validation is not None
                 else self.detailed_validation
             ),
+            budget=budget,
         )
 
         self._unstructure_func.copy_to(res._unstructure_func, self._unstruct_copy_skip)
@@ -1124,6 +1340,7 @@ class Converter(BaseConverter):
             None, t
         ),
         use_alias: bool = False,
+        budget: ConversionBudget | None = None,
     ):
         """
         :param detailed_validation: Whether to use a slightly slower mode for detailed
@@ -1134,6 +1351,9 @@ class Converter(BaseConverter):
             registered structuring hooks match.
         :param use_alias: Whether to use the field alias instead of the field name as
             the un/structured dictionary key by default.
+        :param budget: An optional :class:`~cattrs.ConversionBudget` limiting the
+            work a single conversion may do. Budgets are single-use; see
+            :meth:`BaseConverter.configure_budget`.
 
         ..  versionadded:: 23.2.0 *unstructure_fallback_factory*
         ..  versionadded:: 23.2.0 *structure_fallback_factory*
@@ -1141,6 +1361,7 @@ class Converter(BaseConverter):
             The default `structure_fallback_factory` now raises errors for missing handlers
             more eagerly, surfacing problems earlier.
         ..  versionadded:: 25.2.0 *use_alias*
+        ..  versionadded:: NEXT *budget*
         """
         super().__init__(
             dict_factory=dict_factory,
@@ -1149,6 +1370,7 @@ class Converter(BaseConverter):
             detailed_validation=detailed_validation,
             unstructure_fallback_factory=unstructure_fallback_factory,
             structure_fallback_factory=structure_fallback_factory,
+            budget=budget,
         )
         self.omit_if_default = omit_if_default
         self.forbid_extra_keys = forbid_extra_keys
@@ -1483,11 +1705,14 @@ class Converter(BaseConverter):
         prefer_attrib_converters: bool | None = None,
         detailed_validation: bool | None = None,
         use_alias: bool | None = None,
+        budget: ConversionBudget | None = None,
     ) -> Self:
         """Create a copy of the converter, keeping all existing custom hooks.
 
         :param detailed_validation: Whether to use a slightly slower mode for detailed
             validation errors.
+        :param budget: An optional budget to install on the copy. Budgets are
+            single-use, so the source converter's budget is not copied by default.
         """
         res = self.__class__(
             dict_factory if dict_factory is not None else self._dict_factory,
@@ -1523,6 +1748,7 @@ class Converter(BaseConverter):
                 else self.detailed_validation
             ),
             use_alias=(use_alias if use_alias is not None else self.use_alias),
+            budget=budget,
         )
 
         self._unstructure_func.copy_to(

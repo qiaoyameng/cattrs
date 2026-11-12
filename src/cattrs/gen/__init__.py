@@ -23,6 +23,7 @@ from ..dispatch import UnstructureHook
 from ..errors import (
     AttributeValidationNote,
     ClassValidationError,
+    ConversionBudgetExceeded,
     ForbiddenExtraKeysError,
     IterableValidationError,
     IterableValidationNote,
@@ -114,7 +115,7 @@ def make_dict_unstructure_fn_from_attrs(
     globs = {}
     lines = []
     invocation_lines = []
-    internal_arg_parts = {}
+    internal_arg_parts = {"__c_converter": converter}
 
     if _cattrs_omit_if_default == "from_converter":
         # BaseConverter doesn't have it so we're careful.
@@ -185,7 +186,9 @@ def make_dict_unstructure_fn_from_attrs(
             unstruct_handler_name = f"__c_unstr_{attr_name}"
             globs[unstruct_handler_name] = handler
             internal_arg_parts[unstruct_handler_name] = handler
-            invoke = f"{unstruct_handler_name}(instance.{attr_name})"
+            invoke = _unstruct_call(
+                converter, unstruct_handler_name, f"instance.{attr_name}"
+            )
         else:
             invoke = f"instance.{attr_name}"
 
@@ -399,8 +402,8 @@ def make_dict_structure_fn_from_attrs(
         name = re.sub(r"\|", "u", name)
         fn_name += f"_{name}"
 
-    internal_arg_parts = {"__cl": cl}
-    globs = {}
+    internal_arg_parts = {"__cl": cl, "__c_converter": converter}
+    globs = {"ConversionBudgetExceeded": ConversionBudgetExceeded}
     lines = []
     post_lines = []
     pi_lines = []  # post instantiation lines
@@ -428,6 +431,7 @@ def make_dict_structure_fn_from_attrs(
         invocation_lines.append("**res,")
         internal_arg_parts["__c_cve"] = ClassValidationError
         internal_arg_parts["__c_avn"] = AttributeValidationNote
+        globs["ConversionBudgetExceeded"] = ConversionBudgetExceeded
         for a in attrs:
             an = a.name
             if an in kwargs:
@@ -484,23 +488,33 @@ def make_dict_structure_fn_from_attrs(
                 if handler is not None:
                     if handler == converter._structure_call:
                         internal_arg_parts[struct_handler_name] = t
-                        pi_lines.append(
-                            f"{i}instance.{an} = {struct_handler_name}(o[{kn!r}])"
+                        call = _struct_call(
+                            converter, struct_handler_name, f"o[{kn!r}]"
                         )
                     else:
                         tn = f"__c_type_{an}"
                         internal_arg_parts[tn] = t
-                        pi_lines.append(
-                            f"{i}instance.{an} = {struct_handler_name}(o[{kn!r}], {tn})"
+                        call = _struct_call(
+                            converter, struct_handler_name, f"o[{kn!r}]", tn
                         )
+                    pi_lines.append(f"{i}instance.{an} = {call}")
                 else:
                     pi_lines.append(f"{i}instance.{an} = o[{kn!r}]")
                 i = i[:-2]
+                if converter._budget is not None:
+                    pi_lines.append(
+                        f"{i}except ConversionBudgetExceeded: raise"
+                    )
                 pi_lines.append(f"{i}except Exception as e:")
                 i = f"{i}  "
                 pi_lines.append(
                     f'{i}e.__notes__ = getattr(e, \'__notes__\', []) + [__c_avn("Structuring class {cl.__qualname__} @ attribute {an}", "{an}", __c_type_{an})]'
                 )
+                if converter._budget is not None:
+                    pi_lines.append(
+                        f"{i}__c_converter._budget and "
+                        f"{i}__c_converter._budget.add_error()"
+                    )
                 pi_lines.append(f"{i}errors.append(e)")
 
             else:
@@ -514,32 +528,54 @@ def make_dict_structure_fn_from_attrs(
                 if handler:
                     if handler == converter._structure_call:
                         internal_arg_parts[struct_handler_name] = t
-                        lines.append(
-                            f"{i}res['{ian}'] = {struct_handler_name}(o[{kn!r}])"
+                        call = _struct_call(
+                            converter, struct_handler_name, f"o[{kn!r}]"
                         )
                     else:
-                        lines.append(
-                            f"{i}res['{ian}'] = {struct_handler_name}(o[{kn!r}], {type_name})"
+                        call = _struct_call(
+                            converter,
+                            struct_handler_name,
+                            f"o[{kn!r}]",
+                            type_name,
                         )
+                    lines.append(f"{i}res['{ian}'] = {call}")
                 else:
                     lines.append(f"{i}res['{ian}'] = o[{kn!r}]")
                 i = i[:-2]
+                if converter._budget is not None:
+                    lines.append(f"{i}except ConversionBudgetExceeded: raise")
                 lines.append(f"{i}except Exception as e:")
                 i = f"{i}  "
                 lines.append(
                     f'{i}e.__notes__ = getattr(e, \'__notes__\', []) + [__c_avn("Structuring class {cl.__qualname__} @ attribute {an}", "{an}", __c_type_{an})]'
                 )
+                if converter._budget is not None:
+                    lines.append(
+                        f"{i}__c_converter._budget and "
+                        f"{i}__c_converter._budget.add_error()"
+                    )
                 lines.append(f"{i}errors.append(e)")
 
         if _cattrs_forbid_extra_keys:
             post_lines += [
                 "  unknown_fields = set(o.keys()) - __c_a",
                 "  if unknown_fields:",
+            ]
+            if converter._budget is not None:
+                post_lines.append(
+                    "    __c_converter._budget and __c_converter._budget.add_error()"
+                )
+            post_lines += [
                 "    errors.append(__c_feke('', __cl, unknown_fields))",
             ]
 
         post_lines.append(
             f"  if errors: raise __c_cve('While structuring ' + {cl_name!r}, errors, __cl)"
+        )
+        instantiation_guard = (
+            ["  except ConversionBudgetExceeded: raise"]
+            if converter._budget is not None
+            else []
         )
         if not pi_lines:
             instantiation_lines = (
@@ -547,6 +583,7 @@ def make_dict_structure_fn_from_attrs(
                 + ["    return __cl("]
                 + [f"      {line}" for line in invocation_lines]
                 + ["    )"]
+                + instantiation_guard
                 + [
                     f"  except Exception as exc: raise __c_cve('While structuring ' + {cl_name!r}, [exc], __cl)"
                 ]
@@ -557,6 +594,7 @@ def make_dict_structure_fn_from_attrs(
                 + ["    instance = __cl("]
                 + [f"      {line}" for line in invocation_lines]
                 + ["    )"]
+                + instantiation_guard
                 + [
                     f"  except Exception as exc: raise __c_cve('While structuring ' + {cl_name!r}, [exc], __cl)"
                 ]
@@ -616,13 +654,16 @@ def make_dict_structure_fn_from_attrs(
                     internal_arg_parts[struct_handler_name] = handler
                     if handler == converter._structure_call:
                         internal_arg_parts[struct_handler_name] = t
-                        pi_line = f"  instance.{an} = {struct_handler_name}(o[{kn!r}])"
+                        call = _struct_call(
+                            converter, struct_handler_name, f"o[{kn!r}]"
+                        )
                     else:
                         tn = f"__c_type_{an}"
                         internal_arg_parts[tn] = t
-                        pi_line = (
-                            f"  instance.{an} = {struct_handler_name}(o[{kn!r}], {tn})"
+                        call = _struct_call(
+                            converter, struct_handler_name, f"o[{kn!r}]", tn
                         )
+                    pi_line = f"  instance.{an} = {call}"
                 else:
                     pi_line = f"  instance.{an} = o[{kn!r}]"
 
@@ -633,11 +674,16 @@ def make_dict_structure_fn_from_attrs(
                     internal_arg_parts[struct_handler_name] = handler
                     if handler == converter._structure_call:
                         internal_arg_parts[struct_handler_name] = t
-                        invocation_line = f"{struct_handler_name}(o[{kn!r}]),"
+                        call = _struct_call(
+                            converter, struct_handler_name, f"o[{kn!r}]"
+                        )
                     else:
                         tn = f"__c_type_{an}"
                         internal_arg_parts[tn] = t
-                        invocation_line = f"{struct_handler_name}(o[{kn!r}], {tn}),"
+                        call = _struct_call(
+                            converter, struct_handler_name, f"o[{kn!r}]", tn
+                        )
+                    invocation_line = f"{call},"
                 else:
                     invocation_line = f"o[{kn!r}],"
 
@@ -685,15 +731,16 @@ def make_dict_structure_fn_from_attrs(
                     if handler:
                         if handler == converter._structure_call:
                             internal_arg_parts[struct_handler_name] = t
-                            pi_lines.append(
-                                f"    instance.{an} = {struct_handler_name}(o[{kn!r}])"
+                            call = _struct_call(
+                                converter, struct_handler_name, f"o[{kn!r}]"
                             )
                         else:
                             tn = f"__c_type_{an}"
                             internal_arg_parts[tn] = t
-                            pi_lines.append(
-                                f"    instance.{an} = {struct_handler_name}(o[{kn!r}], {tn})"
+                            call = _struct_call(
+                                converter, struct_handler_name, f"o[{kn!r}]", tn
                             )
+                        pi_lines.append(f"    instance.{an} = {call}")
                     else:
                         pi_lines.append(f"    instance.{an} = o[{kn!r}]")
                 else:
@@ -701,15 +748,16 @@ def make_dict_structure_fn_from_attrs(
                     if handler:
                         if handler == converter._structure_call:
                             internal_arg_parts[struct_handler_name] = t
-                            post_lines.append(
-                                f"    res['{a.alias}'] = {struct_handler_name}(o[{kn!r}])"
+                            call = _struct_call(
+                                converter, struct_handler_name, f"o[{kn!r}]"
                             )
                         else:
                             tn = f"__c_type_{an}"
                             internal_arg_parts[tn] = t
-                            post_lines.append(
-                                f"    res['{a.alias}'] = {struct_handler_name}(o[{kn!r}], {tn})"
+                            call = _struct_call(
+                                converter, struct_handler_name, f"o[{kn!r}]", tn
                             )
+                        post_lines.append(f"    res['{a.alias}'] = {call}")
                     else:
                         post_lines.append(f"    res['{a.alias}'] = o[{kn!r}]")
         if not pi_lines:
@@ -854,6 +902,34 @@ def make_dict_structure_fn(
             del already_generating.working_set
 
 
+def _struct_call(
+    converter: BaseConverter,
+    handler_name: str,
+    value: str,
+    type_name: str | None = None,
+) -> str:
+    """Render a structure invocation for generated code.
+
+    Direct hook calls are emitted when no budget is installed at generation
+    time, preserving the unmetered fast path; a budget-aware re-entrant call is
+    emitted when a budget is already present.
+    """
+    if converter._budget is None:
+        if type_name is None:
+            return f"{handler_name}({value})"
+        return f"{handler_name}({value}, {type_name})"
+    if type_name is None:
+        return f"__c_converter._budget_structure_simple({handler_name}, {value})"
+    return f"__c_converter._budget_structure({handler_name}, {value}, {type_name})"
+
+
+def _unstruct_call(converter: BaseConverter, handler_name: str, value: str) -> str:
+    """Render an unstructure invocation for generated code."""
+    if converter._budget is None:
+        return f"{handler_name}({value})"
+    return f"__c_converter._budget_unstructure({handler_name}, {value})"
+
+
 IterableUnstructureFn = Callable[[Iterable[Any]], Any]
 
 
@@ -878,13 +954,14 @@ def make_hetero_tuple_structure_fn(
         detailed_validation = converter.detailed_validation
 
     type_args = get_args(cl)
-    globs = {}
+    globs = {"ConversionBudgetExceeded": ConversionBudgetExceeded}
     lines = []
-    internal_arg_parts = {"__cl": cl}
+    internal_arg_parts = {"__cl": cl, "__c_converter": converter}
 
     if detailed_validation:
         internal_arg_parts["__c_ive"] = IterableValidationError
         internal_arg_parts["__c_ivn"] = IterableValidationNote
+        globs["ConversionBudgetExceeded"] = ConversionBudgetExceeded
         lines.extend(["  errors = []", "  res = []"])
 
         for ix, t in enumerate(type_args):
@@ -895,39 +972,55 @@ def make_hetero_tuple_structure_fn(
             internal_arg_parts[type_name] = t
             if handler == converter._structure_call:
                 internal_arg_parts[struct_handler_name] = t
-                invocation = f"{struct_handler_name}(o[{ix}])"
+                invocation = _struct_call(
+                    converter, struct_handler_name, f"o[{ix}]"
+                )
             else:
-                invocation = f"{struct_handler_name}(o[{ix}], {type_name})"
+                invocation = _struct_call(
+                    converter, struct_handler_name, f"o[{ix}]", type_name
+                )
             note = f"Structuring {cl} @ index {ix}"
-            lines.extend(
-                [
-                    f"  if len(o) > {ix}:",
-                    "    try:",
-                    f"      res.append({invocation})",
-                    "    except Exception as e:",
-                    (
-                        f"      e.__notes__ = [*getattr(e, '__notes__', []), "
-                        f"__c_ivn({note!r}, {ix}, {type_name})]"
-                    ),
-                    "      errors.append(e)",
-                ]
-            )
-
-        lines.extend(
-            [
-                f"  if len(o) != {len(type_args)}:",
-                (
-                    "    problem = 'Not enough' if len(o) < "
-                    f"{len(type_args)} else 'Too many'"
-                ),
-                '    exc = ValueError(f"{problem} values in {o!r} to structure as {__cl!r}")',
-                "    exc.__notes__ = [f'Structuring {__cl}']",
-                "    errors.append(exc)",
-                "  if errors:",
-                "    raise __c_ive(f'While structuring {__cl!r}', errors, __cl)",
-                "  return tuple(res)",
+            entry_lines = [
+                f"  if len(o) > {ix}:",
+                "    try:",
+                f"      res.append({invocation})",
             ]
-        )
+            if converter._budget is not None:
+                entry_lines.append("    except ConversionBudgetExceeded: raise")
+            entry_lines += [
+                "    except Exception as e:",
+                (
+                    f"      e.__notes__ = [*getattr(e, '__notes__', []), "
+                    f"__c_ivn({note!r}, {ix}, {type_name})]"
+                ),
+            ]
+            if converter._budget is not None:
+                entry_lines.append(
+                    "      __c_converter._budget and __c_converter._budget.add_error()"
+                )
+            entry_lines.append("      errors.append(e)")
+            lines.extend(entry_lines)
+
+        length_lines = [
+            f"  if len(o) != {len(type_args)}:",
+            (
+                "    problem = 'Not enough' if len(o) < "
+                f"{len(type_args)} else 'Too many'"
+            ),
+            '    exc = ValueError(f"{problem} values in {o!r} to structure as {__cl!r}")',
+            "    exc.__notes__ = [f'Structuring {__cl}']",
+        ]
+        if converter._budget is not None:
+            length_lines.append(
+                "    __c_converter._budget and __c_converter._budget.add_error()"
+            )
+        length_lines += [
+            "    errors.append(exc)",
+            "  if errors:",
+            "    raise __c_ive(f'While structuring {__cl!r}', errors, __cl)",
+            "  return tuple(res)",
+        ]
+        lines.extend(length_lines)
     else:
         for ix, t in enumerate(type_args):
             handler = converter.get_structure_hook(t)
@@ -937,9 +1030,13 @@ def make_hetero_tuple_structure_fn(
             internal_arg_parts[type_name] = t
             if handler == converter._structure_call:
                 internal_arg_parts[struct_handler_name] = t
-                invocation = f"{struct_handler_name}(o[{ix}])"
+                invocation = _struct_call(
+                    converter, struct_handler_name, f"o[{ix}]"
+                )
             else:
-                invocation = f"{struct_handler_name}(o[{ix}], {type_name})"
+                invocation = _struct_call(
+                    converter, struct_handler_name, f"o[{ix}]", type_name
+                )
             lines.append(f"    {invocation},")
 
         total_len = len(type_args)
@@ -952,6 +1049,12 @@ def make_hetero_tuple_structure_fn(
             "  )",
         ]
 
+    if converter._budget is not None:
+        lines.insert(
+            0,
+            "  __c_converter._budget and __c_converter._budget.add_container_elements("
+            "len(o))",
+        )
     internal_arg_line = ", ".join([f"{i}={i}" for i in internal_arg_parts])
     globs.update(internal_arg_parts)
     script = "\n".join([f"def {fn_name}(o, _=__cl, {internal_arg_line}):", *lines])
@@ -980,12 +1083,19 @@ def make_hetero_tuple_unstructure_fn(
     # We can do the dispatch here and now.
     handlers = [converter.get_unstructure_hook(type_arg) for type_arg in type_args]
 
-    globs = {f"__cattr_u_{i}": h for i, h in enumerate(handlers)}
+    globs = {
+        f"__cattr_u_{i}": h for i, h in enumerate(handlers)
+    } | {"__c_converter": converter}
     if unstructure_to is not tuple:
         globs["__cattr_seq_cl"] = unstructure_to or cl
     lines = []
 
     lines.append(f"def {fn_name}(tup):")
+    if converter._budget is not None:
+        lines.append(
+            "    __c_converter._budget and __c_converter._budget.add_container_elements("
+            "len(tup))"
+        )
     if unstructure_to is not tuple:
         lines.append("    res = __cattr_seq_cl((")
     else:
@@ -994,7 +1104,9 @@ def make_hetero_tuple_unstructure_fn(
         if handlers[i] == identity:
             lines.append(f"        tup[{i}],")
         else:
-            lines.append(f"        __cattr_u_{i}(tup[{i}]),")
+            lines.append(
+                f"        {_unstruct_call(converter, f'__cattr_u_{i}', f'tup[{i}]')},"
+            )
 
     if unstructure_to is not tuple:
         lines.append("    ))")
@@ -1048,12 +1160,25 @@ def mapping_unstructure_factory(
 
         origin = get_origin(cl)
 
-    globs = {"__cattr_k_u": kh, "__cattr_v_u": val_handler}
+    globs = {
+        "__cattr_k_u": kh,
+        "__cattr_v_u": val_handler,
+        "__c_converter": converter,
+    }
 
-    k_u = "__cattr_k_u(k)" if kh is not None else "k"
-    v_u = "__cattr_v_u(v)" if val_handler is not None else "v"
+    k_u = _unstruct_call(converter, "__cattr_k_u", "k") if kh is not None else "k"
+    v_u = (
+        _unstruct_call(converter, "__cattr_v_u", "v")
+        if val_handler is not None
+        else "v"
+    )
 
     lines = [f"def {fn_name}(mapping):"]
+    if converter._budget is not None:
+        lines.append(
+            "    __c_converter._budget and __c_converter._budget.add_container_elements("
+            "len(mapping))"
+        )
 
     if unstructure_to is dict or (unstructure_to is None and origin is dict):
         if kh is None and val_handler is None:
@@ -1095,7 +1220,7 @@ def mapping_structure_factory(
     globs: dict[str, type] = {"__cattr_mapping_cl": structure_to}
 
     lines = []
-    internal_arg_parts = {}
+    internal_arg_parts = {"__c_converter": converter}
 
     # Let's try fishing out the type args.
     if not is_bare(cl):
@@ -1132,12 +1257,12 @@ def mapping_structure_factory(
             globs["__cattr_k_s"] = key_handler
             globs["__cattr_v_s"] = val_handler
             k_s = (
-                "__cattr_k_s(k, __cattr_k_t)"
+                _struct_call(converter, "__cattr_k_s", "k", "__cattr_k_t")
                 if key_handler != key_type
                 else "__cattr_k_s(k)"
             )
             v_s = (
-                "__cattr_v_s(v, __cattr_v_t)"
+                _struct_call(converter, "__cattr_v_s", "v", "__cattr_v_t")
                 if val_handler != val_type
                 else "__cattr_v_s(v)"
             )
@@ -1146,11 +1271,17 @@ def mapping_structure_factory(
 
     if is_bare_dict:
         # No args, it's a bare dict.
+        if converter._budget is not None:
+            lines.append(
+                "  __c_converter._budget and __c_converter._budget.add_container_elements("
+                "len(mapping))"
+            )
         lines.append("  res = dict(mapping)")
     else:
         if detailed_validation:
             internal_arg_parts["IterableValidationError"] = IterableValidationError
             internal_arg_parts["IterableValidationNote"] = IterableValidationNote
+            globs["ConversionBudgetExceeded"] = ConversionBudgetExceeded
             internal_arg_parts["val_type"] = (
                 val_type if val_type is not NOTHING else Any
             )
@@ -1160,28 +1291,50 @@ def mapping_structure_factory(
             globs["enumerate"] = enumerate
 
             lines.append("  res = {}; errors = []")
+            if converter._budget is not None:
+                lines.append(
+                    "  __c_converter._budget and __c_converter._budget.add_container_elements("
+                    "len(mapping))"
+                )
             lines.append("  for k, v in mapping.items():")
             lines.append("    try:")
             lines.append(f"      value = {v_s}")
+            if converter._budget is not None:
+                lines.append("    except ConversionBudgetExceeded: raise")
             lines.append("    except Exception as e:")
             lines.append(
                 "      e.__notes__ = getattr(e, '__notes__', []) + [IterableValidationNote(f'Structuring mapping value @ key {k!r}', k, val_type)]"
             )
+            if converter._budget is not None:
+                lines.append(
+                    "      __c_converter._budget and __c_converter._budget.add_error()"
+                )
             lines.append("      errors.append(e)")
             lines.append("      continue")
             lines.append("    try:")
             lines.append(f"      key = {k_s}")
             lines.append("      res[key] = value")
+            if converter._budget is not None:
+                lines.append("    except ConversionBudgetExceeded: raise")
             lines.append("    except Exception as e:")
             lines.append(
                 "      e.__notes__ = getattr(e, '__notes__', []) + [IterableValidationNote(f'Structuring mapping key @ key {k!r}', k, key_type)]"
             )
+            if converter._budget is not None:
+                lines.append(
+                    "      __c_converter._budget and __c_converter._budget.add_error()"
+                )
             lines.append("      errors.append(e)")
             lines.append("  if errors:")
             lines.append(
                 f"    raise IterableValidationError('While structuring ' + {repr(cl)!r}, errors, __cattr_mapping_cl)"
             )
         else:
+            if converter._budget is not None:
+                lines.append(
+                    "  __c_converter._budget and __c_converter._budget.add_container_elements("
+                    "len(mapping))"
+                )
             lines.append(f"  res = {{{k_s}: {v_s} for k, v in mapping.items()}}")
     if structure_to is not dict:
         lines.append("  res = __cattr_mapping_cl(res)")
@@ -1232,8 +1385,25 @@ def iterable_unstructure_factory(
             # Save ourselves the trouble of iterating over it all.
             return unstructure_to or cl
 
-    def unstructure_iterable(iterable, _seq_cl=unstructure_to or cl, _hook=handler):
-        return _seq_cl(_hook(i) for i in iterable)
+    if converter._budget is None:
+
+        def unstructure_iterable(
+            iterable, _seq_cl=unstructure_to or cl, _hook=handler
+        ):
+            return _seq_cl(_hook(i) for i in iterable)
+
+    else:
+
+        def unstructure_iterable(
+            iterable,
+            _seq_cl=unstructure_to or cl,
+            _hook=handler,
+            _converter=converter,
+        ):
+            _converter._budget_check_container(iterable)
+            return _seq_cl(
+                _converter._budget_unstructure(_hook, i) for i in iterable
+            )
 
     return unstructure_iterable
 
