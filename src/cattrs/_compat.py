@@ -6,7 +6,8 @@ from collections.abc import MutableSequence as AbcMutableSequence
 from collections.abc import MutableSet as AbcMutableSet
 from collections.abc import Sequence as AbcSequence
 from collections.abc import Set as AbcSet
-from dataclasses import MISSING, Field, is_dataclass
+from dataclasses import MISSING, Field, InitVar, is_dataclass
+from dataclasses import _FIELD_CLASSVAR, _FIELD_INITVAR
 from dataclasses import fields as dataclass_fields
 from functools import partial
 from inspect import signature as _signature
@@ -53,6 +54,7 @@ __all__ = [
     "adapted_fields",
     "fields_dict",
     "has",
+    "is_init_var",
     "is_typeddict",
 ]
 
@@ -132,47 +134,93 @@ def fields(type):
 def fields_dict(type) -> dict[str, Union[Attribute, Field]]:
     """Return the fields_dict for attrs and dataclasses."""
     if is_dataclass(type):
-        return {f.name: f for f in dataclass_fields(type)}
+        # `dataclasses.fields` omits `InitVar`s, but they live in the class
+        # dict alongside the regular fields.
+        return dict(type.__dataclass_fields__)
     return attrs_fields_dict(type)
+
+
+#: Metadata key marking an `attrs.Attribute` produced from a dataclass
+#: `InitVar`.
+INIT_VAR_METADATA_KEY = "_cattrs_init_var"
+
+
+def is_init_var(attr: Union[Attribute, Field]) -> bool:
+    """Whether the given field is a dataclass `InitVar`.
+
+    Works on raw dataclasses `Field`s and the adapted `attrs.Attribute`s
+    produced by `adapted_fields`.
+    """
+    metadata = getattr(attr, "metadata", None)
+    if metadata is not None and metadata.get(INIT_VAR_METADATA_KEY):
+        return True
+    # `dataclasses.Field._field_type` is `_FIELD_INITVAR` for `InitVar`s.
+    return getattr(attr, "_field_type", None) is _FIELD_INITVAR
+
+
+def _unwrap_init_var(type: Any) -> Any:
+    """Return the inner type of an `InitVar` annotation."""
+    if type is InitVar:
+        # A bare `InitVar` annotation has no inner type.
+        return Any
+    return type.type if isinstance(type, InitVar) else type
 
 
 def adapted_fields(cl: type) -> list[Attribute]:
     """Return the attrs format of `fields()` for attrs and dataclasses.
 
     Resolves `attrs` stringified annotations, if present.
+
+    Dataclass `InitVar`s are included as regular init fields, marked through
+    their `metadata`; they are constructor-only inputs and never appear on
+    instances.
     """
     if is_dataclass(cl):
-        attrs = dataclass_fields(cl)
+        # `__dataclass_fields__` contains `InitVar`s and `ClassVar`s, both
+        # of which `dataclasses.fields()` omits. Only keep real fields and
+        # `InitVar`s; the latter are marked below.
+        attrs = [
+            a
+            for a in cl.__dataclass_fields__.values()
+            if a._field_type is not _FIELD_CLASSVAR
+        ]
         if any(isinstance(a.type, str) for a in attrs):
             # Do this conditionally in case `get_type_hints` fails, so
-            # users can resolve on their own first.
+            # users can resolve on their own first. `get_type_hints` also
+            # resolves stringified `InitVar`s into `InitVar[...]` objects.
             type_hints = get_type_hints(cl)
         else:
             type_hints = {}
-        return [
-            Attribute(
-                attr.name,
-                (
-                    attr.default
-                    if attr.default is not MISSING
-                    else (
-                        Factory(attr.default_factory)
-                        if attr.default_factory is not MISSING
-                        else NOTHING
-                    )
-                ),
-                None,
-                True,
-                None,
-                True,
-                attr.init,
-                True,
-                type=type_hints.get(attr.name, attr.type),
-                alias=attr.name,
-                kw_only=getattr(attr, "kw_only", False),
+        res = []
+        for attr in attrs:
+            hint = type_hints.get(attr.name, attr.type)
+            init_var = hint is InitVar or isinstance(hint, InitVar)
+            metadata = {INIT_VAR_METADATA_KEY: True} if init_var else None
+            res.append(
+                Attribute(
+                    attr.name,
+                    (
+                        attr.default
+                        if attr.default is not MISSING
+                        else (
+                            Factory(attr.default_factory)
+                            if attr.default_factory is not MISSING
+                            else NOTHING
+                        )
+                    ),
+                    None,
+                    True,
+                    None,
+                    True,
+                    attr.init,
+                    True,
+                    type=_unwrap_init_var(hint),
+                    alias=attr.name,
+                    kw_only=getattr(attr, "kw_only", False),
+                    metadata=metadata,
+                )
             )
-            for attr in attrs
-        ]
+        return res
     attribs = attrs_fields(cl)
     if any(isinstance(a.type, str) for a in attribs):
         # PEP 563 annotations - need to be resolved.

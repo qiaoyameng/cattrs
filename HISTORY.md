@@ -13,6 +13,8 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
 
 ## NEXT
 
+- Support dataclass [`InitVar`](https://docs.python.org/3/library/dataclasses.html#dataclasses.InitVar) fields in both `BaseConverter` and `Converter`: they are treated as constructor-only inputs, structured by type and per-field overrides, and never emitted when unstructuring.
+- Fix structuring of keyword-only dataclass fields when using the `BaseConverter` (they are now passed by keyword).
 - Fix the msgspec converter passing typed deques directly to the encoder, which cannot serialize them. Deques are now unstructured into lists, including when nested in attrs classes or dataclasses.
   ([#818](https://github.com/python-attrs/cattrs/issues/818) [#819](https://github.com/python-attrs/cattrs/pull/819))
 

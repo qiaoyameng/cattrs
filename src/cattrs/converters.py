@@ -4,7 +4,7 @@ from collections import Counter, deque
 from collections.abc import Callable, Iterable
 from collections.abc import Mapping as AbcMapping
 from collections.abc import MutableMapping as AbcMutableMapping
-from dataclasses import Field
+from dataclasses import Field, is_dataclass
 from enum import Enum
 from inspect import Signature
 from inspect import signature as inspect_signature
@@ -32,6 +32,7 @@ from ._compat import (
     Sequence,
     Set,
     TypeAlias,
+    adapted_fields,
     fields,
     frozendict,
     get_final_base,
@@ -60,6 +61,7 @@ from ._compat import (
     sentinel,
     signature,
 )
+from ._generics import deep_copy_with
 from .cols import (
     defaultdict_structure_factory,
     homogenous_tuple_structure_factory,
@@ -98,6 +100,7 @@ from .gen import (
     HeteroTupleUnstructureFn,
     IterableUnstructureFn,
     MappingUnstructureFn,
+    generate_mapping,
     make_dict_structure_fn,
     make_dict_unstructure_fn,
     make_hetero_tuple_structure_fn,
@@ -785,6 +788,19 @@ class BaseConverter:
 
     def structure_attrs_fromtuple(self, obj: tuple[Any, ...], cl: type[T]) -> T:
         """Load an attrs class from a sequence (tuple)."""
+        if is_dataclass(cl):
+            # Dataclass constructor inputs (including `InitVar`s) may be
+            # keyword-only, so pass them all by keyword. `init=False` fields
+            # are not constructor inputs and are skipped.
+            typevar_map = generate_mapping(cl, {}) if is_generic(cl) else {}
+            conv_obj = {}
+            for a, value in zip(adapted_fields(cl), obj):
+                if not a.init:
+                    continue
+                attr_type = self._resolve_dataclass_attr_type(a, typevar_map, cl)
+                conv_obj[a.alias] = self._structure_attribute(a, value, attr_type)
+            return cl(**conv_obj)
+
         conv_obj = []  # A list of converter parameters.
         for a, value in zip(fields(cl), obj):
             # We detect the type by the metadata.
@@ -793,9 +809,23 @@ class BaseConverter:
 
         return cl(*conv_obj)
 
-    def _structure_attribute(self, a: Attribute | Field, value: Any) -> Any:
+    @staticmethod
+    def _resolve_dataclass_attr_type(
+        a: Attribute, typevar_map: dict[str, Any], cl: type
+    ) -> Any:
+        """Resolve a dataclass attribute type against a typevar mapping."""
+        attr_type = a.type
+        if isinstance(attr_type, TypeVar):
+            return typevar_map.get(attr_type.__name__, attr_type)
+        if is_generic(attr_type) and not is_bare(attr_type):
+            return deep_copy_with(attr_type, typevar_map, cl)
+        return attr_type
+
+    def _structure_attribute(
+        self, a: Attribute | Field, value: Any, type_: Any = None
+    ) -> Any:
         """Handle an individual attrs attribute."""
-        type_ = a.type
+        type_ = a.type if type_ is None else type_
         attrib_converter = getattr(a, "converter", None)
         if self._prefer_attrib_converters and attrib_converter:
             # A attrib converter is defined on this attribute, and
@@ -820,14 +850,30 @@ class BaseConverter:
         # For public use.
 
         conv_obj = {}  # Start with a fresh dict, to ignore extra keys.
-        for a in fields(cl):
-            try:
-                val = obj[a.name]
-            except KeyError:
-                continue
+        if is_dataclass(cl):
+            # Dataclass fields need adapting so `InitVar`s (constructor-only
+            # inputs) are included; `init=False` fields are skipped.
+            typevar_map = generate_mapping(cl, {}) if is_generic(cl) else {}
+            for a in adapted_fields(cl):
+                if not a.init:
+                    continue
+                try:
+                    val = obj[a.name]
+                except KeyError:
+                    continue
+                attr_type = self._resolve_dataclass_attr_type(a, typevar_map, cl)
+                conv_obj[a.alias] = self._structure_attribute(a, val, attr_type)
+        else:
+            for a in fields(cl):
+                try:
+                    val = obj[a.name]
+                except KeyError:
+                    continue
 
-            # try .alias and .name because this code also supports dataclasses!
-            conv_obj[getattr(a, "alias", a.name)] = self._structure_attribute(a, val)
+                # try .alias and .name because this code also supports dataclasses!
+                conv_obj[getattr(a, "alias", a.name)] = self._structure_attribute(
+                    a, val
+                )
 
         return cl(**conv_obj)
 
@@ -1342,10 +1388,16 @@ class Converter(BaseConverter):
         self, cl: type[T]
     ) -> Callable[[T], dict[str, Any]]:
         origin = get_origin(cl)
-        attribs = fields(origin or cl)
-        if attrs_has(cl) and any(isinstance(a.type, str) for a in attribs):
-            # PEP 563 annotations - need to be resolved.
-            resolve_types(origin or cl)
+        if is_dataclass(origin or cl):
+            # Adapted fields include dataclass `InitVar`s, so their type
+            # overrides are picked up; the generated hook still skips them
+            # because they are not readable on instances.
+            attribs = adapted_fields(origin or cl)
+        else:
+            attribs = fields(origin or cl)
+            if attrs_has(cl) and any(isinstance(a.type, str) for a in attribs):
+                # PEP 563 annotations - need to be resolved.
+                resolve_types(origin or cl)
         attrib_overrides = {
             a.name: self.type_overrides[a.type]
             for a in attribs
@@ -1388,10 +1440,16 @@ class Converter(BaseConverter):
         self, cl: type[T]
     ) -> Callable[[Mapping[str, Any], Any], T]:
         origin = get_origin(cl)
-        attribs = fields(origin or cl if is_generic(cl) else cl)
-        if attrs_has(cl) and any(isinstance(a.type, str) for a in attribs):
-            # PEP 563 annotations - need to be resolved.
-            resolve_types(origin or cl)
+        target = origin or cl if is_generic(cl) else cl
+        if is_dataclass(target):
+            # Include constructor-only `InitVar` fields so their type
+            # overrides apply.
+            attribs = adapted_fields(target)
+        else:
+            attribs = fields(target)
+            if attrs_has(cl) and any(isinstance(a.type, str) for a in attribs):
+                # PEP 563 annotations - need to be resolved.
+                resolve_types(origin or cl)
         attrib_overrides = {
             a.name: self.type_overrides[a.type]
             for a in attribs

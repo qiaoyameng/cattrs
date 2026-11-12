@@ -17,6 +17,7 @@ from .._compat import (
     is_bare,
     is_bare_final,
     is_generic,
+    is_init_var,
 )
 from .._generics import deep_copy_with
 from ..dispatch import UnstructureHook
@@ -134,6 +135,10 @@ def make_dict_unstructure_fn_from_attrs(
                 kwargs[attr_name] = override
 
         if override.omit:
+            continue
+        # InitVars are constructor-only inputs and never exist on instances,
+        # so there is nothing to read back.
+        if is_init_var(a):
             continue
         if override.omit is None and not a.init and not _cattrs_include_init_false:
             continue
