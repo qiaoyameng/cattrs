@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar
 
@@ -26,6 +27,7 @@ from ..errors import (
     ForbiddenExtraKeysError,
     IterableValidationError,
     IterableValidationNote,
+    MappingKeyCollisionError,
     StructureHandlerNotFoundError,
 )
 from ..fns import identity
@@ -1017,11 +1019,15 @@ def mapping_unstructure_factory(
     converter: BaseConverter,
     unstructure_to: Any = None,
     key_handler: Callable[[Any, Any | None], Any] | None = None,
+    check_key_collisions: bool = False,
 ) -> MappingUnstructureFn:
     """Generate a specialized unstructure function for a mapping.
 
     :param unstructure_to: The class to unstructure to; defaults to the
         same class as the mapping being unstructured.
+    :param check_key_collisions: Whether to raise
+        {class}`cattrs.errors.MappingKeyCollisionError` when two keys unstructure
+        into the same key.
     """
     kh = key_handler or converter.unstructure
     val_handler = converter.unstructure
@@ -1055,7 +1061,27 @@ def mapping_unstructure_factory(
 
     lines = [f"def {fn_name}(mapping):"]
 
-    if unstructure_to is dict or (unstructure_to is None and origin is dict):
+    # Counters take (key, count) pairs and do not convert their keys, so there
+    # is no conversion collision to detect and they must keep their constructor.
+    if check_key_collisions and origin is not Counter:
+        globs["__cattr_mkce"] = MappingKeyCollisionError
+        lines.append("    seen = {}")
+        lines.append("    items = []")
+        lines.append("    for k, v in mapping.items():")
+        lines.append(f"        new_key = {k_u}")
+        lines.append(f"        new_value = {v_u}")
+        lines.append("        if new_key in seen:")
+        lines.append(
+            "            raise __cattr_mkce(new_key.__class__, k, seen[new_key])"
+        )
+        lines.append("        seen[new_key] = k")
+        lines.append("        items.append((new_key, new_value))")
+        if unstructure_to is dict or (unstructure_to is None and origin is dict):
+            lines.append("    return dict(items)")
+        else:
+            globs["__cattr_mapping_cl"] = unstructure_to or cl
+            lines.append("    return __cattr_mapping_cl(items)")
+    elif unstructure_to is dict or (unstructure_to is None and origin is dict):
         if kh is None and val_handler is None:
             # Simplest path.
             return dict
@@ -1085,12 +1111,16 @@ def mapping_structure_factory(
     key_type=NOTHING,
     val_type=NOTHING,
     detailed_validation: bool | Literal["from_converter"] = "from_converter",
+    check_key_collisions: bool | Literal["from_converter"] = "from_converter",
 ) -> SimpleStructureHook[Mapping[Any, Any], T]:
     """Generate a specialized structure function for a mapping."""
     fn_name = "structure_mapping"
 
     if detailed_validation == "from_converter":
         detailed_validation = converter.detailed_validation
+
+    if check_key_collisions == "from_converter":
+        check_key_collisions = getattr(converter, "check_key_collisions", False)
 
     globs: dict[str, type] = {"__cattr_mapping_cl": structure_to}
 
@@ -1158,8 +1188,14 @@ def mapping_structure_factory(
                 key_type if key_type is not NOTHING else Any
             )
             globs["enumerate"] = enumerate
+            if check_key_collisions:
+                internal_arg_parts["MappingKeyCollisionError"] = (
+                    MappingKeyCollisionError
+                )
 
             lines.append("  res = {}; errors = []")
+            if check_key_collisions:
+                lines.append("  seen = {}")
             lines.append("  for k, v in mapping.items():")
             lines.append("    try:")
             lines.append(f"      value = {v_s}")
@@ -1171,6 +1207,12 @@ def mapping_structure_factory(
             lines.append("      continue")
             lines.append("    try:")
             lines.append(f"      key = {k_s}")
+            if check_key_collisions:
+                lines.append("      if key in seen:")
+                lines.append(
+                    "        raise MappingKeyCollisionError(key_type, k, seen[key])"
+                )
+                lines.append("      seen[key] = k")
             lines.append("      res[key] = value")
             lines.append("    except Exception as e:")
             lines.append(
@@ -1181,6 +1223,22 @@ def mapping_structure_factory(
             lines.append(
                 f"    raise IterableValidationError('While structuring ' + {repr(cl)!r}, errors, __cattr_mapping_cl)"
             )
+        elif check_key_collisions:
+            internal_arg_parts["MappingKeyCollisionError"] = MappingKeyCollisionError
+            internal_arg_parts["key_type"] = (
+                key_type if key_type is not NOTHING else Any
+            )
+            lines.append("  res = {}")
+            lines.append("  seen = {}")
+            lines.append("  for k, v in mapping.items():")
+            lines.append(f"    value = {v_s}")
+            lines.append(f"    key = {k_s}")
+            lines.append("    if key in seen:")
+            lines.append(
+                "      raise MappingKeyCollisionError(key_type, k, seen[key])"
+            )
+            lines.append("    seen[key] = k")
+            lines.append("    res[key] = value")
         else:
             lines.append(f"  res = {{{k_s}: {v_s} for k, v in mapping.items()}}")
     if structure_to is not dict:

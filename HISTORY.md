@@ -13,6 +13,10 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
 
 ## NEXT
 
+- Add opt-in mapping key collision detection through the `check_key_collisions` converter option.
+  When enabled, structuring and unstructuring raise a {class}`cattrs.errors.MappingKeyCollisionError` if two source entries convert to the same key, instead of silently overwriting one with the other.
+  The error reports the target key type and both source entries; nested mappings still produce the usual validation ExceptionGroup, and unhashable keys and failing hooks keep their original exception types.
+  The option defaults to `False`, preserving the previous behavior, and works with both `BaseConverter` and `Converter`.
 - Fix the msgspec converter passing typed deques directly to the encoder, which cannot serialize them. Deques are now unstructured into lists, including when nested in attrs classes or dataclasses.
   ([#818](https://github.com/python-attrs/cattrs/issues/818) [#819](https://github.com/python-attrs/cattrs/pull/819))
 

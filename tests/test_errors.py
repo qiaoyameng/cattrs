@@ -10,6 +10,7 @@ from cattrs.errors import (
     ClassValidationError,
     ForbiddenExtraKeysError,
     IterableValidationError,
+    MappingKeyCollisionError,
     StructureHandlerNotFoundError,
 )
 
@@ -32,6 +33,10 @@ from cattrs.errors import (
         (
             ClassValidationError,
             ("ClassValidation Message", [ValueError("Test ClassValidation")], int),
+        ),
+        (
+            MappingKeyCollisionError,
+            (int, "1", "01"),
         ),
     ],
 )

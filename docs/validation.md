@@ -120,3 +120,38 @@ If even more customization is required, {func}`cattrs.transform_error` can be co
 
 Non-detailed validation can be enabled by initializing any of the converters with `detailed_validation=False`.
 In this mode, any errors during un/structuring will bubble up directly as soon as they happen.
+
+## Mapping Key Collisions
+
+When a mapping is structured or unstructured, its keys are converted.
+Two different source keys may convert to the same key, so one of the entries would silently overwrite the other.
+
+```python
+>>> from typing import Dict
+>>> from cattrs import Converter
+>>> converter = Converter()
+>>> converter.structure({"01": "a", "1": "b"}, Dict[int, str])
+{1: 'b'}
+```
+
+Passing `check_key_collisions=True` to either converter makes this an error instead.
+
+```{versionadded} NEXT
+```
+
+```python
+>>> from cattrs import MappingKeyCollisionError
+>>> converter = Converter(check_key_collisions=True, detailed_validation=False)
+>>> converter.structure({"01": "a", "1": "b"}, Dict[int, str])
+Traceback (most recent call last):
+...
+cattrs.errors.MappingKeyCollisionError: Key collision while converting mapping keys to int: '1' collides with '01'
+```
+
+In detailed validation mode (the default) the {class}`~cattrs.errors.MappingKeyCollisionError` is grouped into the mapping's {class}`~cattrs.errors.IterableValidationError` and nested mappings keep producing the usual exception tree.
+In non-detailed mode the error is raised directly as soon as the collision is detected.
+The error exposes the target key type and both source entries through its `key_type`, `source_key` and `colliding_key` attributes, so the two conflicting items can always be located.
+
+The same check covers unstructuring, for example when enum members from different enum classes export to the same value.
+Unhashable converted keys and failing conversion hooks keep raising their original exception types.
+The setting defaults to `False` to preserve the historical behavior, is honored by both {class}`~cattrs.BaseConverter` and {class}`~cattrs.Converter`, and is carried over by {meth}`Converter.copy <cattrs.BaseConverter.copy>`.

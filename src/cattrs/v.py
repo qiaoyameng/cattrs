@@ -6,6 +6,7 @@ from .errors import (
     ClassValidationError,
     ForbiddenExtraKeysError,
     IterableValidationError,
+    MappingKeyCollisionError,
 )
 
 __all__ = ["format_exception", "transform_error"]
@@ -42,6 +43,8 @@ def format_exception(exc: BaseException, type: Union[type, None]) -> str:
             res = f"invalid value for type, expected {tn}"
     elif isinstance(exc, ForbiddenExtraKeysError):
         res = f"extra fields found ({', '.join(sorted(exc.extra_fields))})"
+    elif isinstance(exc, MappingKeyCollisionError):
+        res = str(exc)
     elif isinstance(exc, AttributeError) and exc.args[0].endswith(
         "object has no attribute 'items'"
     ):

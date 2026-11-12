@@ -115,6 +115,46 @@ class ClassValidationError(BaseValidationError):
         return excs_with_notes, other_excs
 
 
+class MappingKeyCollisionError(CattrsError):
+    """
+    Raised when two keys of a mapping are converted to the same key while
+    structuring or unstructuring, so that one of the entries would silently
+    overwrite the other.
+
+    The attribute `key_type` is the type the keys are being converted to,
+    `source_key` is the key of the entry being processed when the collision was
+    detected, and `colliding_key` is the key of the entry that produced the same
+    converted key first.
+    """
+
+    def __init__(
+        self,
+        key_type: Any,
+        source_key: Any,
+        colliding_key: Any,
+    ) -> None:
+        self.key_type = key_type
+        self.source_key = source_key
+        self.colliding_key = colliding_key
+        super().__init__(key_type, source_key, colliding_key)
+
+    def __str__(self) -> str:
+        type_name = (
+            self.key_type.__name__
+            if hasattr(self.key_type, "__name__")
+            else repr(self.key_type)
+        )
+        return (
+            f"Key collision while converting mapping keys to {type_name}: "
+            f"{self.source_key!r} collides with {self.colliding_key!r}"
+        )
+
+
+#: Aliases for {class}`MappingKeyCollisionError`, for discoverability.
+DictKeyCollisionError = MappingKeyCollisionError
+KeyCollisionError = MappingKeyCollisionError
+
+
 class ForbiddenExtraKeysError(CattrsError):
     """
     Raised when `forbid_extra_keys` is activated and such extra keys are detected
