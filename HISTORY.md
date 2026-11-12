@@ -13,6 +13,7 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
 
 ## NEXT
 
+- Add the versioned structures strategy: {py:func}`configure_versioned_structure <cattrs.strategies.configure_versioned_structure>` registers explicit, graph-checked migrations outside the model constructor, with eager cycle, ambiguity and future-version rejection, per-step restricted JSON copies, step and field-path error reporting, independent nested versions, and normal structure and extra-key validation after migration. Default unstructuring emits the target version via {py:func}`configure_versioned_unstructure <cattrs.strategies.configure_versioned_unstructure>`; explicit legacy export uses separately registered downgrades through {py:func}`export_version <cattrs.strategies.export_version>` rather than reversing migrations.
 - Fix the msgspec converter passing typed deques directly to the encoder, which cannot serialize them. Deques are now unstructured into lists, including when nested in attrs classes or dataclasses.
   ([#818](https://github.com/python-attrs/cattrs/issues/818) [#819](https://github.com/python-attrs/cattrs/pull/819))
 

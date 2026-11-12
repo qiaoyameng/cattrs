@@ -393,3 +393,87 @@ This strategy has been preapplied to the following preconfigured converters:
 ```{versionadded} 23.2.0
 
 ```
+
+## Versioned Structures Strategy
+
+_Found at {py:func}`cattrs.strategies.configure_versioned_structure`._
+
+When an endpoint starts sending more than one schema version, compatibility logic usually leaks into model constructors (``if "old_field" in data``).
+The versioned structure strategy keeps every migration in an explicit, separately registered graph instead.
+You declare the version field, the single current (target) version, and one migration function per step.
+A payload is migrated to the target version first, and only then goes through the normal structure hook, so ordinary type validation and extra-key checks still run on the migrated data.
+
+Each migration is a {py:class}`~cattrs.strategies.MigrationStep` with a source version, a target version and a callable.
+The callable receives an independent deep copy of the restricted JSON payload and returns the next version's payload; it never receives or mutates the caller's input.
+
+```{doctest} versioned
+
+>>> from attrs import define
+>>> from cattrs import Converter
+>>> from cattrs.strategies import MigrationStep, configure_versioned_structure, configure_versioned_unstructure
+
+>>> @define
+... class Article:
+...     title: str
+...     tags: list[str]
+
+>>> def v1_to_v2(payload):
+...     payload["tags"] = [payload.pop("name")]
+...     return payload
+
+>>> def v2_to_v3(payload):
+...     payload["title"] = payload["title"].upper()
+...     return payload
+
+>>> converter = Converter(forbid_extra_keys=True)
+>>> _ = configure_versioned_structure(
+...     Article,
+...     converter,
+...     target_version=3,
+...     migrations=[
+...         MigrationStep(1, 2, v1_to_v2),
+...         MigrationStep(2, 3, v2_to_v3),
+...     ],
+... )
+
+>>> converter.structure(
+...     {"version": 1, "name": "cat", "title": "hello"}, Article
+... )
+Article(title='HELLO', tags=['cat'])
+```
+
+A v1 payload therefore crosses two explicit steps; a v2 payload crosses one; a v3 payload crosses none.
+The same successful step is never run twice for one payload.
+
+### Graph validation
+
+The graph is validated eagerly when migrations are registered, before any payload is processed:
+
+- registering the same source version twice raises {py:class}`~cattrs.strategies.DuplicateMigrationError`,
+- cycles raise {py:class}`~cattrs.strategies.MigrationCycleError`,
+- more than one route from a version toward the target raises {py:class}`~cattrs.strategies.AmbiguousMigrationPathError`,
+- an edge leaving the target version raises {py:class}`~cattrs.strategies.MigrationGraphError`.
+
+At structure time, versions above the target are explicitly refused with {py:class}`~cattrs.strategies.UnknownVersionError`, versions with no path raise {py:class}`~cattrs.strategies.MissingMigrationError`, and a failing step raises {py:class}`~cattrs.strategies.MigrationStepError` carrying both the failed step and a field path.
+
+Migrations can be declared incrementally: calling {py:func}`~cattrs.strategies.configure_versioned_structure` again for the same class appends steps and re-validates the whole graph, so a chain may be built up across calls.
+
+### Nested versions
+
+Nested models may be versioned independently.
+Each class carries its own registry and is migrated by its own structure hook; the outer model's version is never copied into a nested object, even when both use the same version field name.
+Configure nested models before their containers, since generated structure hooks capture the nested hooks that exist at registration time.
+
+### Unstructuring and legacy export
+
+Default unstructuring and legacy export are deliberately separate capabilities.
+
+{py:func}`~cattrs.strategies.configure_versioned_unstructure` makes the ordinary `converter.unstructure(...)` emit the current target version.
+
+Exporting an explicit older version is not derived from the forward migrations, because a forward step cannot be reversed losslessly in general.
+Instead, you register an explicit downgrade with {py:func}`~cattrs.strategies.register_downgrade` and call {py:func}`~cattrs.strategies.export_version`.
+Missing downgrades raise an error rather than guessing a reverse migration.
+
+```{versionadded} NEXT
+
+```
