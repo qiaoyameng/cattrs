@@ -120,3 +120,36 @@ If even more customization is required, {func}`cattrs.transform_error` can be co
 
 Non-detailed validation can be enabled by initializing any of the converters with `detailed_validation=False`.
 In this mode, any errors during un/structuring will bubble up directly as soon as they happen.
+
+## Key Collision Detection
+
+```{versionadded} 25.3.0
+
+```
+
+When a mapping is converted, its keys are converted through the key hook for the target type.
+If two source entries convert to the same target key, the resulting mapping can only keep one of the values and the other is silently lost.
+For example, the strings `"01"` and `"1"` both convert to the integer `1`.
+
+Passing `check_key_collision=True` to a converter makes both structuring and unstructuring raise a {class}`cattrs.KeyCollisionError` instead of returning a silently truncated mapping.
+The collision is detected from the converted key identities before the result mapping is built, and the error keeps both original keys, their zero-based source positions and the target key type.
+The error message itself does not include the original key values, but always locates both source entries.
+
+```{doctest}
+
+>>> from cattrs import Converter, KeyCollisionError
+>>> from cattrs.errors import IterableValidationError
+>>> from typing import Dict
+
+>>> converter = Converter(check_key_collision=True)
+>>> try:
+...     converter.structure({"01": "a", "1": "b"}, Dict[int, str])
+... except IterableValidationError as group:
+...     exc = group.exceptions[0]
+...     print(exc.first_position, exc.second_position, exc.target_key_type)
+0 1 <class 'int'>
+```
+
+In detailed validation mode the {class}`~cattrs.KeyCollisionError` is attached to the usual {class}`cattrs.IterableValidationError` tree, so collisions nested inside other structures are reported at their full path by {func}`cattrs.transform_error`.
+The same option is available on the generated mapping factories {func}`cattrs.gen.make_mapping_structure_fn` and {func}`cattrs.gen.make_mapping_unstructure_fn`.
+The default value is `False`, preserving the historical overwrite behavior.

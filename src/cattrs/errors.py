@@ -140,3 +140,60 @@ class ForbiddenExtraKeysError(CattrsError):
             or f"Extra fields in constructor for {self.cl.__name__}: "
             f"{', '.join(sorted(self.extra_fields))}"
         )
+
+
+class KeyCollisionError(CattrsError):
+    """Raised when structuring or unstructuring a mapping produces duplicate keys.
+
+    Two source entries (identified by their original keys and zero-based positions)
+    convert to the same target key, so building the result mapping would silently
+    drop one of the values.
+
+    The original key values are not included in the message, so sensitive data is
+    not leaked, but both source positions are reported and the original keys are
+    kept on the exception for programmatic access.
+
+    .. versionadded:: 25.3.0
+    """
+
+    def __init__(
+        self,
+        cl: Any,
+        target_key_type: Any,
+        first_key: Any,
+        first_position: int,
+        second_key: Any,
+        second_position: int,
+        operation: str = "structuring",
+    ) -> None:
+        self.cl = cl
+        self.target_key_type = target_key_type
+        self.first_key = first_key
+        self.first_position = first_position
+        self.second_key = second_key
+        self.second_position = second_position
+        self.operation = operation
+
+        message = (
+            f"Key collision while {operation} {cl!r}: source entries at positions "
+            f"{first_position} and {second_position} both produce a key of type "
+            f"{target_key_type!r}"
+        )
+        super().__init__(message)
+
+    def __str__(self) -> str:
+        return self.args[0]
+
+    def __reduce__(self):
+        return (
+            self.__class__,
+            (
+                self.cl,
+                self.target_key_type,
+                self.first_key,
+                self.first_position,
+                self.second_key,
+                self.second_position,
+                self.operation,
+            ),
+        )

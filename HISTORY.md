@@ -13,6 +13,8 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
 
 ## NEXT
 
+- Add an optional `check_key_collision` parameter to `BaseConverter` and `Converter` (and the mapping gen factories). When enabled, structuring or unstructuring a mapping raises a `KeyCollisionError` if two source entries convert to the same target key, instead of silently dropping one value. The error reports both source positions, the original keys and the target key type, while the message itself omits key values.
+
 - Fix the msgspec converter passing typed deques directly to the encoder, which cannot serialize them. Deques are now unstructured into lists, including when nested in attrs classes or dataclasses.
   ([#818](https://github.com/python-attrs/cattrs/issues/818) [#819](https://github.com/python-attrs/cattrs/pull/819))
 

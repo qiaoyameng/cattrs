@@ -24,6 +24,7 @@ from ..errors import (
     AttributeValidationNote,
     ClassValidationError,
     ForbiddenExtraKeysError,
+    KeyCollisionError,
     IterableValidationError,
     IterableValidationNote,
     StructureHandlerNotFoundError,
@@ -1017,12 +1018,18 @@ def mapping_unstructure_factory(
     converter: BaseConverter,
     unstructure_to: Any = None,
     key_handler: Callable[[Any, Any | None], Any] | None = None,
+    check_key_collision: bool | Literal["from_converter"] = "from_converter",
 ) -> MappingUnstructureFn:
     """Generate a specialized unstructure function for a mapping.
 
     :param unstructure_to: The class to unstructure to; defaults to the
         same class as the mapping being unstructured.
+    :param check_key_collision: Whether to raise a `KeyCollisionError` when two
+        entries unstructure to the same key.
     """
+    if check_key_collision == "from_converter":
+        check_key_collision = converter._check_key_collision
+
     kh = key_handler or converter.unstructure
     val_handler = converter.unstructure
 
@@ -1048,7 +1055,11 @@ def mapping_unstructure_factory(
 
         origin = get_origin(cl)
 
-    globs = {"__cattr_k_u": kh, "__cattr_v_u": val_handler}
+    globs = {
+        "__cattr_k_u": kh,
+        "__cattr_v_u": val_handler,
+        "__cattr_key_collision_error": KeyCollisionError,
+    }
 
     k_u = "__cattr_k_u(k)" if kh is not None else "k"
     v_u = "__cattr_v_u(v)" if val_handler is not None else "v"
@@ -1059,14 +1070,42 @@ def mapping_unstructure_factory(
         if kh is None and val_handler is None:
             # Simplest path.
             return dict
-
-        lines.append(f"    return {{{k_u}: {v_u} for k, v in mapping.items()}}")
+        if check_key_collision:
+            lines.append("    res = {}")
+            lines.append("    seen = {}")
+            lines.append("    for position, (k, v) in enumerate(mapping.items()):")
+            lines.append(f"        new_key = {k_u}")
+            lines.append("        if new_key in seen:")
+            lines.append("            first_key, first_position = seen[new_key]")
+            lines.append(
+                "            raise __cattr_key_collision_error(mapping.__class__, type(new_key), first_key, first_position, k, position, 'unstructuring')"
+            )
+            lines.append("        seen[new_key] = (k, position)")
+            lines.append(f"        res[new_key] = {v_u}")
+            lines.append("    return res")
+        else:
+            lines.append(
+                f"    return {{{k_u}: {v_u} for k, v in mapping.items()}}"
+            )
     else:
         globs["__cattr_mapping_cl"] = unstructure_to or cl
-        lines.append(
-            f"    res = __cattr_mapping_cl(({k_u}, {v_u}) for k, v in mapping.items())"
-        )
-
+        if check_key_collision:
+            lines.append("    intermediate = {}")
+            lines.append("    seen = {}")
+            lines.append("    for position, (k, v) in enumerate(mapping.items()):")
+            lines.append(f"        new_key = {k_u}")
+            lines.append("        if new_key in seen:")
+            lines.append("            first_key, first_position = seen[new_key]")
+            lines.append(
+                "            raise __cattr_key_collision_error(mapping.__class__, type(new_key), first_key, first_position, k, position, 'unstructuring')"
+            )
+            lines.append("        seen[new_key] = (k, position)")
+            lines.append(f"        intermediate[new_key] = {v_u}")
+            lines.append("    res = __cattr_mapping_cl(intermediate)")
+        else:
+            lines.append(
+                f"    res = __cattr_mapping_cl(({k_u}, {v_u}) for k, v in mapping.items())"
+            )
         lines = [*lines, "    return res"]
 
     eval(compile("\n".join(lines), "", "exec"), globs)
@@ -1085,12 +1124,15 @@ def mapping_structure_factory(
     key_type=NOTHING,
     val_type=NOTHING,
     detailed_validation: bool | Literal["from_converter"] = "from_converter",
+    check_key_collision: bool | Literal["from_converter"] = "from_converter",
 ) -> SimpleStructureHook[Mapping[Any, Any], T]:
     """Generate a specialized structure function for a mapping."""
     fn_name = "structure_mapping"
 
     if detailed_validation == "from_converter":
         detailed_validation = converter.detailed_validation
+    if check_key_collision == "from_converter":
+        check_key_collision = converter._check_key_collision
 
     globs: dict[str, type] = {"__cattr_mapping_cl": structure_to}
 
@@ -1158,9 +1200,13 @@ def mapping_structure_factory(
                 key_type if key_type is not NOTHING else Any
             )
             globs["enumerate"] = enumerate
+            if check_key_collision:
+                globs["__cattr_key_collision_error"] = KeyCollisionError
 
             lines.append("  res = {}; errors = []")
-            lines.append("  for k, v in mapping.items():")
+            if check_key_collision:
+                lines.append("  seen = {}")
+            lines.append("  for position, (k, v) in enumerate(mapping.items()):")
             lines.append("    try:")
             lines.append(f"      value = {v_s}")
             lines.append("    except Exception as e:")
@@ -1171,6 +1217,13 @@ def mapping_structure_factory(
             lines.append("      continue")
             lines.append("    try:")
             lines.append(f"      key = {k_s}")
+            if check_key_collision:
+                lines.append("      if key in seen:")
+                lines.append("        first_key, first_position = seen[key]")
+                lines.append(
+                    "        raise __cattr_key_collision_error(cl, key_type, first_key, first_position, k, position)"
+                )
+                lines.append("      seen[key] = (k, position)")
             lines.append("      res[key] = value")
             lines.append("    except Exception as e:")
             lines.append(
@@ -1182,7 +1235,25 @@ def mapping_structure_factory(
                 f"    raise IterableValidationError('While structuring ' + {repr(cl)!r}, errors, __cattr_mapping_cl)"
             )
         else:
-            lines.append(f"  res = {{{k_s}: {v_s} for k, v in mapping.items()}}")
+            if check_key_collision:
+                globs["__cattr_key_collision_error"] = KeyCollisionError
+                globs["key_type"] = (
+                    key_type if key_type is not NOTHING else Any
+                )
+                lines.append("  res = {}; seen = {}")
+                lines.append("  for position, (k, v) in enumerate(mapping.items()):")
+                lines.append(f"    key = {k_s}")
+                lines.append("    if key in seen:")
+                lines.append("      first_key, first_position = seen[key]")
+                lines.append(
+                    "      raise __cattr_key_collision_error(cl, key_type, first_key, first_position, k, position)"
+                )
+                lines.append("    seen[key] = (k, position)")
+                lines.append(f"    res[key] = {v_s}")
+            else:
+                lines.append(
+                    f"  res = {{{k_s}: {v_s} for k, v in mapping.items()}}"
+                )
     if structure_to is not dict:
         lines.append("  res = __cattr_mapping_cl(res)")
 
